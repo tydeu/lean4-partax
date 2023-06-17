@@ -6,7 +6,15 @@ Authors: Mac Malone
 import Partax
 import Lean.Parser.Basic
 
-open Lean Parser
+open Partax Parsec
+open Lean hiding Parsec
+open Parser
+
+instance [ToString ε] [ToString α] : Eval (Except ε α) where
+  eval f _ :=
+    match f () with
+    | .ok a => IO.print <| toString a
+    | .error e => throw <| IO.userError <| toString e
 
 -- Simple example of a symbol (an atom) wrapped in a node
 syntax ex1 := "foo"
@@ -64,10 +72,11 @@ compile_parser_descr exSepDigit
 --#print exSepDigit.parsec.raw
 #print exSepDigit.parsec
 #eval exSepDigit.parsec.run "[]"
---#eval exSepDigit.parsec.run "[0,] "
+#eval exSepDigit.parsec.run "[0,] "
 #eval exSepDigit.parsec.run " [0, 1]"
 
 -- Demonstration of compiling builtin Lean syntax
+#print explicitBinders
 compile_parser_descr explicitBinders
 --#check binderIdent.parsec.raw
 --#eval binderIdent.parsec.run "foo.bar"
@@ -82,6 +91,11 @@ compile_parser_descr exCatP
 #eval exCatP.parsec.run "b b a"
 
 -- Demonstration of compiling a whole builtin Lean category
-syntax exBuiltinCat := prio
-compile_parser_descr exBuiltinCat
 compile_parser_category prio in ex
+#eval ex.prio.run "default"
+compile_parser_category conv in ex
+#eval ex.conv.run
+" first
+  | done done
+  | done
+"

@@ -30,21 +30,42 @@ unsafe def unsafeEvalParserDescr
 @[implemented_by unsafeEvalParserDescr] opaque evalParserDescr
 (env : Environment) (opts : Options) (name : Name) : Except String (ParserDescr × Bool)
 
+@[inline] def Parsec.dummy (errMsg : String := "dummy parser") : Parsec Syntax := do
+  throw {unexpected := errMsg}
+
 def aliases :=
   ({} : NameMap Name)
-  |>.insert `orelse ``Parsec.OrElse.pOrElse
-  |>.insert `andthen ``Parsec.AndThen.pAndThen
+  |>.insert `atomic ``Parsec.atomic
+  |>.insert `orelse ``ParsecOrElse.orElse
+  |>.insert `andthen ``ParsecAndThen.andThen
   |>.insert `optional ``Parsec.optional
+  |>.insert `group ``Parsec.group
   |>.insert `many ``Parsec.many
   |>.insert `many1 ``Parsec.many1
+  |>.insert `sepByIndentSemicolon ``Parsec.sepByIndentSemicolon
+  |>.insert `sepBy1IndentSemicolon ``Parsec.sepBy1IndentSemicolon
   |>.insert `num ``Parsec.num
   |>.insert `ident ``Parsec.ident
+  |>.insert `hole ``Parsec.hole
+  |>.insert `withPosition ``Parsec.withPosition
+  |>.insert `withoutPosition ``Parsec.withoutPosition
+  |>.insert `checkColGe ``Parsec.checkColGe
+  |>.insert `checkColGt ``Parsec.checkColGt
+  |>.insert `checkColEq ``Parsec.checkColEq
+  |>.insert `colGe ``Parsec.checkColGe
+  |>.insert `colGt ``Parsec.checkColGt
+  |>.insert `colEq ``Parsec.checkColEq
+  |>.insert `ppSpace ``Parsec.nop
+  |>.insert `ppDedent ``id
+  |>.insert `ppLine ``Parsec.nop
+  |>.insert `patternIgnore ``id
+  -- Placeholders
   |>.insert `term ``Parsec.term
   |>.insert `decimal ``Parsec.decimal
-  |>.insert `hole ``Parsec.hole
-  |>.insert `withoutPosition ``id
-  |>.insert `ppSpace ``Parsec.nop
   |>.insert ``Priority.numPrio ``Parsec.num
+  |>.insert `tacticSeq ``Parsec.dummy
+  |>.insert ``Tactic.Conv.dsimp ``Parsec.dummy
+  |>.insert ``Tactic.Conv.simp ``Parsec.dummy
 
 instance : Coe Name Ident where
   coe := mkIdent
@@ -62,7 +83,7 @@ where
   | .const name => do
     let some alias := aliases.find? name
       | throwError s!"no parser alias defined for alias `{name}`"
-    return (mkCIdentFrom ref alias, #[])
+    return (mkCIdentFrom ref alias, {})
   | .unary name p => do
     let some alias := aliases.find? name
       | throwError s!"no parser alias defined for alias `{name}`"
@@ -75,24 +96,24 @@ where
     let (p1, defs1) ← compileDescr p1
     let (p2, defs2) ← compileDescr p2
     let value := mkApp (mkCIdentFrom ref alias) #[p1, p2]
-    return (value, defs1 ++ defs2)
-  | .node kind _prec p => do -- No precedence support
+    return (value, defs1.append defs2)
+  | .node kind prec p => do
     let (p, defs) ← compileDescr p
-    let value ← ``(Parsec.node $(quote kind) $p)
+    let value ← ``(Parsec.leadingNode $(quote kind) $(quote prec) $p)
     return (value, defs)
-  | .trailingNode kind _prec _lhsPrec p => do -- Does not really work (missing LHS)
+  | .trailingNode kind prec lhsPrec p => do -- Does not really work (missing LHS)
     let (p, defs) ← compileDescr p
-    let value ← ``(Parsec.node $(quote kind) $p)
+    let value ← ``(Parsec.trailingNode $(quote kind) $(quote prec) $(quote lhsPrec) $p)
     return (value, defs)
   | .symbol val => do
-    let value ← `(Parsec.atom $(quote val.trim))
-    return (value, #[])
+    let value ← ``(Parsec.atom $(quote val.trim))
+    return (value, {})
   | .nonReservedSymbol val _includeIdent => do
-    let value ← `(Parsec.atom $(quote val.trim))
-    return (value, #[])
-  | .cat catName _rbp => do -- Requires `partial`; No precedence support
+    let value ← ``(Parsec.atom $(quote val.trim))
+    return (value, {})
+  | .cat catName rbp => do -- Requires `partial`
     if let some alias := aliases.find? catName then
-      return (mkCIdentFrom ref alias, #[])
+      return (mkCIdentFrom ref alias, {})
     else if let some cat := cats.find? catName then
       let mut ps := #[]
       let mut defs := #[]
@@ -108,34 +129,41 @@ where
           else
             let (descr, _) ← IO.ofExcept <| evalParserDescr (← getEnv) (← getOptions) name
             let (p, pdefs) ← compileDescr descr
-            defs := defs.push <| mkDef pName p
             defs := defs.append pdefs
+            defs := defs.push <| mkDef pName p
         let qps ← ps.foldlM (``(Array.push $(·) $(·))) (← ``(Array.empty))
-        let value ← ``(Parsec.cat $(quote catName) $qps)
+        let value ← ``(Parsec.category $(quote catName) $qps)
         defs := defs.push <| mkDef cName value
-      return (mkIdentFrom ref cName, defs)
+      let value ← ``(Parsec.withPrec $(quote rbp) $cName)
+      return (value, defs)
     else
       throwError s!"no parser alias defined for unknown category `{catName}`"
   | .parser name => do -- Alias only
     let some alias := aliases.find? name
       | throwError s!"no parser alias defined for parser `{name}`"
-    return (mkCIdentFrom ref alias, #[])
-  | .nodeWithAntiquot name kind p => do -- No antiquote support
-    let nName := ns.str name
+    return (mkCIdentFrom ref alias, {})
+  | .nodeWithAntiquot _name kind p => do -- No antiquote support
+    let nName := ns ++ kind
     let (p, defs) ← compileDescr p
     let value ← ``(Parsec.node $(quote kind) ↑$p)
-    let defs := defs.push <| mkDef nName value
-    return (mkIdent nName, defs)
+    if (← get).contains nName then
+      return (mkIdent nName, defs)
+    else
+      modify (·.insert nName)
+      let defs := defs.push <| mkDef nName value
+      return (mkIdent nName, defs)
   | .sepBy p _sep psep allowTrailingSep => do
     let (p, pdefs) ← compileDescr p
     let (s, sdefs) ← compileDescr psep
-    let value ← `(Parsec.sepBy $p $s $(quote allowTrailingSep))
-    return (value, pdefs ++ sdefs)
+    let defs := pdefs.append sdefs
+    let value ← ``(Parsec.sepBy $p $s $(quote allowTrailingSep))
+    return (value, defs)
   | .sepBy1 p _sep psep allowTrailingSep => do
     let (p, pdefs) ← compileDescr p
     let (s, sdefs) ← compileDescr psep
-    let value ← `(Parsec.sepBy1 $p $s $(quote allowTrailingSep))
-    return (value, pdefs ++ sdefs)
+    let defs := pdefs.append sdefs
+    let value ← ``(Parsec.sepBy1 $p $s $(quote allowTrailingSep))
+    return (value, defs)
 
 elab "compile_parser_descr " id:ident : command => do
   let ref ← getRef

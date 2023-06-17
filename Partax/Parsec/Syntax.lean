@@ -4,18 +4,106 @@ Released under the MIT license.
 Authors: Mac Malone
 -/
 import Lean.Syntax
+import Lean.Message
+import Lean.Parser.Extension
 import Partax.Parsec.Basic
 
-open Lean Parsec Syntax
+open Lean Syntax
 
-namespace Partax.Parsec
+namespace Partax
 
 --------------------------------------------------------------------------------
--- # Syntax-specific Parsec Helpers
+-- # Parsec Type for Parsing Syntax
 --------------------------------------------------------------------------------
 
-instance : CoeOut (Parsec (TSyntax k)) (Parsec Syntax) where
-  coe x := x
+export Lean.Parser (InputContext Error)
+
+structure ParsecContext extends InputContext where
+  prec : Nat
+  savedPos? : Option String.Pos := none
+
+structure ParsecState where
+  lhsPrec : Nat := 0
+  pos : String.Pos := 0
+
+abbrev Parsec := ReaderT ParsecContext <| EStateM Error ParsecState
+
+namespace Parsec
+
+instance : MonadInput Parsec where
+  getInput := return (← read).input
+  getInputPos := return (← get).pos
+  setInputPos pos := modify ({· with pos := pos})
+
+instance : MonadCheckpoint Parsec where
+  checkpoint f := fun c s => let d := s; f (fun _ _ => .ok () d) c s
+
+instance : ThrowUnexpected Parsec where
+  throwUnexpected unexpected expected := throw {unexpected, expected}
+
+def mergeOrElse (p1 : Parsec α) (p2 : Unit → Parsec α) : Parsec α :=
+  try p1 catch e1 => try p2 () catch e2 => throw <| e1.merge e2
+
+instance : MonadOrElse Parsec := ⟨mergeOrElse⟩
+
+open Lean Parser in
+@[inline] nonrec def run (p : Parsec α) (input : String) : Except String α :=
+  let ctx := {toInputContext := mkInputContext input "<string>", prec := 0}
+  match p.run ctx |>.run {} with
+  | .ok a _ => .ok a
+  | .error e s =>
+    let pos := ctx.fileMap.toPosition s.pos
+    .error <| mkErrorStringWithPos ctx.fileName pos (toString e)
+
+@[inline] def fail (errMsg : String := "parse failure") : Parsec α := do
+  throw {unexpected := errMsg}
+
+def throwUnexpectedPrec : Parsec PUnit :=
+  throwUnexpected "unexpected token at this precedence level; consider parenthesizing the term"
+
+@[inline] def checkPrec (prec : Nat) : Parsec PUnit := do
+  unless (← read).prec ≤ prec do throwUnexpectedPrec
+
+@[inline] def withPrec (prec : Nat) (p : Parsec α) : Parsec α := do
+  withReader ({· with prec}) p
+
+@[inline] def checkLhsPrec (prec : Nat) : Parsec PUnit := do
+  unless (← get).lhsPrec ≤ prec do throwUnexpectedPrec
+
+@[inline] def setLhsPrec (prec : Nat) : Parsec PUnit := do
+  modify ({· with lhsPrec := prec})
+
+@[inline] def withSavedPos (savedPos? : Option String.Pos) (p : Parsec α) : Parsec α := do
+  withReader ({· with savedPos?}) p
+
+@[inline] def withPosition (p : Parsec α) : Parsec α := do
+  withSavedPos (← getInputPos) p
+
+@[inline] def withoutPosition (p : Parsec α) : Parsec α := do
+  withSavedPos none p
+
+@[inline] def compareToSavedPos (f : Position → Position → Bool) (errorMsg : String) : Parsec PUnit := do
+  let ctx ← read
+  if let some savedPos := ctx.savedPos? then
+    let savedPos := ctx.fileMap.toPosition savedPos
+    let pos := ctx.fileMap.toPosition (← getInputPos)
+    unless f pos savedPos do throwUnexpected errorMsg
+
+@[inline] def checkColGe (errorMsg : String := "checkColGe") : Parsec PUnit := do
+  compareToSavedPos (·.column ≥ ·.column) errorMsg
+
+@[inline] def checkColGt (errorMsg : String := "checkColGt") : Parsec PUnit := do
+  compareToSavedPos (·.column > ·.column) errorMsg
+
+@[inline] def checkColEq (errorMsg : String := "checkColEq") : Parsec PUnit := do
+  compareToSavedPos (·.column = ·.column) errorMsg
+
+@[inline] def checkLinebreakBefore : Parsec PUnit := do
+  nop -- TODO: stub
+
+--------------------------------------------------------------------------------
+-- # Syntax-specific Parsers
+--------------------------------------------------------------------------------
 
 instance : Coe (Parsec Syntax) (Parsec (Array Syntax)) where
   coe x := Array.singleton <$> x
@@ -23,37 +111,40 @@ instance : Coe (Parsec Syntax) (Parsec (Array Syntax)) where
 instance : CoeOut (Parsec (Array (TSyntax k))) (Parsec (Array Syntax)) where
   coe x := x
 
-def withWsInfo (p : Parsec α) : Parsec (SourceInfo × α) := do
-  let leading ← extractSub ws
-  let start ← read
+instance : CoeOut (Parsec (TSyntax k)) (Parsec Syntax) where
+  coe x := x
+
+def withSourceInfo (p : Parsec α) : Parsec (SourceInfo × α) := do
+  let leading ← extractSub skipWs
+  let start ← getInputPos
   let a ← p
-  let stop ← read
-  let trailing ← extractSub ws
-  let info := .original leading start.pos trailing stop.pos
+  let stop ← getInputPos
+  let trailing ← extractSub skipWs
+  let info := .original leading start trailing stop
   return (info, a)
 
 def atomicId : Parsec String := do
-  if (← matched <| satisfy isIdBeginEscape) then
-    extract do repeat if (← matched <| satisfy isIdEndEscape) then break
+  if (← attempt <| satisfy isIdBeginEscape) then
+    extract do skipTillSatisfy isIdEndEscape
   else
     extract do
-      skipSatisfy isIdFirst
-      skipMany <| skipSatisfy isIdRest
+      skipSatisfy isIdFirst ["identifier start"]
+      skipMany <| skipSatisfy isIdRest ["identifier part"]
 
 def name : Parsec Name := do
   let mut n := Name.anonymous
   repeat
     let s ← atomicId
     n := Name.str n s
-  until !(← matched <| skipChar '.')
+  until !(← attempt <| skipChar '.')
   return n
 
 def ident : Parsec Ident := do
-  let (info, rawVal, val) ← withWsInfo <| withSubstring <| name
+  let (info, rawVal, val) ← withSourceInfo <| withSubstring <| name
   return ⟨.ident info rawVal val []⟩
 
 def atomOf (p : Parsec PUnit) : Parsec Syntax := do
-  let (info, val) ← withWsInfo <| extract p
+  let (info, val) ← withSourceInfo <| extract p
   return .atom info val
 
 abbrev TAtom (val : String) := TSyntax (Name.str .anonymous val)
@@ -61,11 +152,17 @@ abbrev TAtom (val : String) := TSyntax (Name.str .anonymous val)
 def atom (val : String) : Parsec (TAtom val) :=
   (⟨·⟩) <$> atomOf (skipString val)
 
-def decimal : Parsec Syntax := atomOf do
-  skipMany digit
-
 def node (kind : SyntaxNodeKind) (p : Parsec (Array Syntax)) : Parsec (TSyntax kind) := do
   return ⟨.node SourceInfo.none kind (← p)⟩
+
+def leadingNode (kind : SyntaxNodeKind) (prec : Nat) (p : Parsec (Array Syntax)) : Parsec (TSyntax kind) := do
+  checkPrec prec; let n ← node kind p; setLhsPrec prec; return n
+
+def trailingNode (kind : SyntaxNodeKind) (prec lhsPrec : Nat) (p : Parsec (Array Syntax)) : Parsec (TSyntax kind) := do
+  checkPrec prec; checkLhsPrec lhsPrec; let n ← node kind p; setLhsPrec prec; return n
+
+def group (p : Parsec (Array Syntax)) : Parsec Syntax :=
+  node groupKind p
 
 def hole : Parsec (TSyntax `Lean.Parser.Term.hole) :=
   node `Lean.Parser.Term.hole <| atom "_"
@@ -74,11 +171,12 @@ def num : Parsec NumLit :=
   node numLitKind <| Array.singleton <$> atomOf do
     let c ← digit
     if c = '0' then
-      match (← anyChar) with
+      let b ← anyChar
+      match b with
       | 'b' => skipMany1 hexDigit
       | 'o' => skipMany1 octDigit
       | 'x' => skipMany1 bit
-      | _ => fail "numeral expected"
+      | _ => skipMany digit
     else
       skipMany digit
 
@@ -91,17 +189,15 @@ def str : Parsec StrLit :=
       | '"' => break
       | _ => continue
 
-def optional (p : Parsec (Array Syntax)) : Parsec Syntax := fun it =>
-  match p it with
-  | .success it args => .success it (mkNullNode args)
-  | .error _ _ => .success it mkNullNode
+def optional (p : Parsec (Array Syntax)) : Parsec Syntax :=
+  attemptD mkNullNode <| @mkNullNode <$> p
 
 def sepByTrailing (initArgs : Array Syntax)
 (p : Parsec Syntax) (sep : Parsec Syntax) : Parsec Syntax := do
   let mut args := initArgs
-  repeat if let some a ← option p then
+  repeat if let some a ← attempt? p then
     args := args.push a
-    if let some s ← option sep then
+    if let some s ← attempt? sep then
       args := args.push s
     else
       break
@@ -113,7 +209,7 @@ def sepBy1NoTrailing (initArgs : Array Syntax)
   repeat
     let a ← p
     args := args.push a
-    if let some s ← option sep then
+    if let some s ← attempt? sep then
       args := args.push s
     else
       break
@@ -122,8 +218,8 @@ def sepBy1NoTrailing (initArgs : Array Syntax)
 def sepBy (p : Parsec Syntax) (sep : Parsec Syntax) (allowTrailingSep : Bool) : Parsec Syntax := do
   if allowTrailingSep then
     sepByTrailing #[] p sep
-  else if let some a ← option p then
-    if let some s ← option sep then
+  else if let some a ← attempt? p then
+    if let some s ← attempt? sep then
       sepBy1NoTrailing #[a, s] p sep
     else
       return mkNullNode #[a]
@@ -132,7 +228,7 @@ def sepBy (p : Parsec Syntax) (sep : Parsec Syntax) (allowTrailingSep : Bool) : 
 
 def sepBy1 (p : Parsec Syntax) (sep : Parsec Syntax) (allowTrailingSep : Bool) : Parsec Syntax := do
   let a ← p
-  if let some s ← option sep then
+  if let some s ← attempt? sep then
     if allowTrailingSep then
       sepByTrailing #[a, s] p sep
     else
@@ -140,86 +236,130 @@ def sepBy1 (p : Parsec Syntax) (sep : Parsec Syntax) (allowTrailingSep : Bool) :
   else
     sepBy1NoTrailing #[] p sep
 
+@[inline] def sepByIndent (p : Parsec Syntax) (sep : Parsec Syntax) (allowTrailingSep := false) : Parsec Syntax :=
+  withPosition <| sepBy (checkColGe *> p) (sep <|> checkColEq *> checkLinebreakBefore *> pure mkNullNode) allowTrailingSep
+
+@[inline] def sepBy1Indent (p : Parsec Syntax) (sep : Parsec Syntax) (allowTrailingSep := false) : Parsec Syntax :=
+  withPosition <| sepBy1 (checkColGe *> p) (sep <|> checkColEq *> checkLinebreakBefore *> pure mkNullNode) allowTrailingSep
+
+def sepByIndentSemicolon (p : Parsec Syntax) : Parsec Syntax :=
+  sepByIndent p (atom ";") (allowTrailingSep := true)
+
+def sepBy1IndentSemicolon (p : Parsec Syntax) : Parsec Syntax :=
+  sepBy1Indent p (atom ";") (allowTrailingSep := true)
+
 -- Only a trivial replication (no pratt parsing)
-def cat (name : Name) (kinds : Array (Parsec Syntax)) : Parsec (TSyntax name) := do
-  (⟨·⟩) <$> kinds.foldr orelse (fail "")
+def category (name : Name) (kinds : Array (Parsec Syntax)) : Parsec (TSyntax name) := do
+  (⟨·⟩) <$> choice kinds s!"attempted to parse empty category '{name}'"
 
 -- Just for testing purposes
+
 def term : Parsec Term :=
-  cat `term #[ident, num, str]
+  category `term #[ident, num, str]
+
+def decimal : Parsec Syntax := atomOf do
+  skipMany digit
+
+end Parsec
 
 --------------------------------------------------------------------------------
 -- ## Parsec Combinators
 --------------------------------------------------------------------------------
 
-class OrElse (α : Type) (β : Type) (γ : outParam Type) where
-  pOrElse : Parsec α → Parsec β → Parsec γ
+open Parsec
 
-instance : OrElse Syntax Syntax Syntax where
-  pOrElse p1 p2 := orelse p1 p2
+class ParsecOrElse (α : Type) (β : Type) (γ : outParam Type) where
+  orElse : Parsec α → Parsec β → Parsec γ
+
+instance : ParsecOrElse Syntax Syntax Syntax where
+  orElse p1 p2 := attemptOrElse p1 p2
 
 instance : Append SyntaxNodeKinds := inferInstanceAs (Append (List SyntaxNodeKind))
 
-instance : OrElse (TSyntax k1) (TSyntax k2) (TSyntax (k1 ++ k2)) where
-  pOrElse p1 p2 := orelse ((⟨·.raw⟩) <$> p1) ((⟨·.raw⟩)  <$> p2)
+instance : ParsecOrElse (TSyntax k1) (TSyntax k2) Syntax where
+  orElse p1 p2 := attemptOrElse p1 p2
 
-instance : OrElse (Array (TSyntax k1)) (TSyntax k2) (Array (TSyntax (k1 ++ k2))) where
-  pOrElse p1 p2 := orelse
+instance : ParsecOrElse (TSyntax k1) (TSyntax k2) (Array Syntax) where
+  orElse p1 p2 := attemptOrElse p1 p2
+
+instance : ParsecOrElse (TSyntax k1) (TSyntax k2) (TSyntax (k1 ++ k2)) where
+  orElse p1 p2 := attemptOrElse ((⟨·.raw⟩) <$> p1) ((⟨·.raw⟩)  <$> p2)
+
+instance : ParsecOrElse (Array (TSyntax k)) (TSyntax k) (Array Syntax) where
+  orElse p1 p2 := attemptOrElse p1 p2
+
+instance : ParsecOrElse (TSyntax k) (Array (TSyntax k)) (Array Syntax) where
+  orElse p1 p2 := attemptOrElse p1 p2
+
+instance : ParsecOrElse (Array Syntax) (TSyntax k) (Array Syntax) where
+  orElse p1 p2 := attemptOrElse p1 p2
+
+instance : ParsecOrElse (TSyntax k) (Array Syntax) (Array Syntax) where
+  orElse p1 p2 := attemptOrElse p1 p2
+
+instance : ParsecOrElse Syntax (TSyntax k) Syntax where
+  orElse p1 p2 := attemptOrElse p1 p2
+
+instance : ParsecOrElse (TSyntax k) Syntax Syntax where
+  orElse p1 p2 := attemptOrElse p1 p2
+
+instance : ParsecOrElse (Array (TSyntax k1)) (TSyntax k2) (Array (TSyntax (k1 ++ k2))) where
+  orElse p1 p2 := attemptOrElse
     ((·.map (⟨·.raw⟩)) <$> p1)
     ((fun x => Array.singleton ⟨x.raw⟩) <$> p2)
 
-instance : OrElse (TSyntax k1) (Array (TSyntax k2)) (Array (TSyntax (k1 ++ k2))) where
-  pOrElse p1 p2 := orelse
+instance : ParsecOrElse (TSyntax k1) (Array (TSyntax k2)) (Array (TSyntax (k1 ++ k2))) where
+  orElse p1 p2 := attemptOrElse
     ((fun x => Array.singleton ⟨x.raw⟩) <$> p1)
     ((·.map (⟨·.raw⟩)) <$> p2)
 
-class AndThen (α : Type) (β : Type) (γ : outParam Type) where
-  pAndThen : Parsec α → Parsec β → Parsec γ
+class ParsecAndThen (α : Type) (β : Type) (γ : outParam Type) where
+  andThen : Parsec α → Parsec β → Parsec γ
 
-instance : AndThen (Array Syntax) (Array Syntax) (Array Syntax) where
-  pAndThen p1 p2 := return (← p1) ++ (← p2)
+instance : ParsecAndThen (Array Syntax) (Array Syntax) (Array Syntax) where
+  andThen p1 p2 := return (← p1) ++ (← p2)
 
-instance : AndThen (Array (TSyntax k1)) (Array (TSyntax k2)) (Array Syntax) where
-  pAndThen p1 p2 := return (← p1) ++ (← p2)
+instance : ParsecAndThen (Array (TSyntax k1)) (Array (TSyntax k2)) (Array Syntax) where
+  andThen p1 p2 := return (← p1) ++ (← p2)
 
-instance : AndThen (Array (TSyntax k)) (Array Syntax) (Array Syntax) where
-  pAndThen p1 p2 := return (← p1) ++ (← p2)
+instance : ParsecAndThen (Array (TSyntax k)) (Array Syntax) (Array Syntax) where
+  andThen p1 p2 := return (← p1) ++ (← p2)
 
-instance : AndThen (Array Syntax) (Array (TSyntax k)) (Array Syntax) where
-  pAndThen p1 p2 := return (← p1) ++ (← p2)
+instance : ParsecAndThen (Array Syntax) (Array (TSyntax k)) (Array Syntax) where
+  andThen p1 p2 := return (← p1) ++ (← p2)
 
-instance : AndThen (Array Syntax) (TSyntax k) (Array Syntax) where
-  pAndThen p1 p2 := return (← p1).push (← p2)
+instance : ParsecAndThen (Array Syntax) (TSyntax k) (Array Syntax) where
+  andThen p1 p2 := return (← p1).push (← p2)
 
-instance : AndThen (TSyntax k) (Array Syntax) (Array Syntax) where
-  pAndThen p1 p2 := return #[← p1] ++ (← p2)
+instance : ParsecAndThen (TSyntax k) (Array Syntax) (Array Syntax) where
+  andThen p1 p2 := return #[← p1] ++ (← p2)
 
-instance : AndThen (Array (TSyntax k1)) (TSyntax k2) (Array Syntax) where
-  pAndThen p1 p2 := return ((← p1) : Array Syntax).push (← p2)
+instance : ParsecAndThen (Array (TSyntax k1)) (TSyntax k2) (Array Syntax) where
+  andThen p1 p2 := return ((← p1) : Array Syntax).push (← p2)
 
-instance : AndThen (TSyntax k1) (Array (TSyntax k2))  (Array Syntax) where
-  pAndThen p1 p2 := return #[← p1] ++ (← p2)
+instance : ParsecAndThen (TSyntax k1) (Array (TSyntax k2))  (Array Syntax) where
+  andThen p1 p2 := return #[← p1] ++ (← p2)
 
-instance : AndThen (Array Syntax) Syntax (Array Syntax) where
-  pAndThen p1 p2 := return (← p1).push (← p2)
+instance : ParsecAndThen (Array Syntax) Syntax (Array Syntax) where
+  andThen p1 p2 := return (← p1).push (← p2)
 
-instance : AndThen (Array (TSyntax k)) Syntax (Array Syntax) where
-  pAndThen p1 p2 := return ((← p1) : Array Syntax).push (← p2)
+instance : ParsecAndThen (Array (TSyntax k)) Syntax (Array Syntax) where
+  andThen p1 p2 := return ((← p1) : Array Syntax).push (← p2)
 
-instance : AndThen Syntax Syntax (Array Syntax) where
-  pAndThen p1 p2 := return #[(← p1), (← p2)]
+instance : ParsecAndThen Syntax Syntax (Array Syntax) where
+  andThen p1 p2 := return #[(← p1), (← p2)]
 
-instance : AndThen (TSyntax k1) (TSyntax k2) (Array Syntax) where
-  pAndThen p1 p2 := return #[(← p1), (← p2)]
+instance : ParsecAndThen (TSyntax k1) (TSyntax k2) (Array Syntax) where
+  andThen p1 p2 := return #[(← p1), (← p2)]
 
-instance : AndThen (TSyntax k) Syntax (Array Syntax) where
-  pAndThen p1 p2 := return #[(← p1), (← p2)]
+instance : ParsecAndThen (TSyntax k) Syntax (Array Syntax) where
+  andThen p1 p2 := return #[(← p1), (← p2)]
 
-instance : AndThen Syntax (TSyntax k) (Array Syntax) where
-  pAndThen p1 p2 := return #[(← p1), (← p2)]
+instance : ParsecAndThen Syntax (TSyntax k) (Array Syntax) where
+  andThen p1 p2 := return #[(← p1), (← p2)]
 
-instance : AndThen α PUnit α where
-  pAndThen p1 p2 := do let r ← p1; p2; return r
+instance : ParsecAndThen α PUnit α where
+  andThen p1 p2 := do let r ← p1; p2; return r
 
-instance : AndThen PUnit α α where
-  pAndThen p1 p2 := do p1; p2
+instance : ParsecAndThen PUnit α α where
+  andThen p1 p2 := do p1; p2
