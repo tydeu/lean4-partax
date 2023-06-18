@@ -62,9 +62,6 @@ namespace Parsec
 -- ## Primitives
 --------------------------------------------------------------------------------
 
-/-- A no-op parser. -/
-@[always_inline, inline] def nop [Pure m] : m PUnit := pure ()
-
 section
 variable [Monad m] [MonadInput m]
 

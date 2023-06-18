@@ -7,6 +7,7 @@ import Lean.Parser.Basic
 import Lean.Elab.ElabRules
 import Lean.PrettyPrinter
 import Partax.Parsec
+import Partax.Trace
 
 open Lean Elab Term Syntax Parser Command
 
@@ -40,8 +41,8 @@ def aliases :=
   |>.insert `andthen ``ParsecAndThen.andThen
   |>.insert `optional ``Parsec.optional
   |>.insert `group ``Parsec.group
-  |>.insert `many ``Parsec.many
-  |>.insert `many1 ``Parsec.many1
+  |>.insert `many ``Parsec.manySyntax
+  |>.insert `many1 ``Parsec.many1Syntax
   |>.insert `sepByIndentSemicolon ``Parsec.sepByIndentSemicolon
   |>.insert `sepBy1IndentSemicolon ``Parsec.sepBy1IndentSemicolon
   |>.insert `num ``Parsec.num
@@ -64,12 +65,11 @@ def aliases :=
   |>.insert `decimal ``Parsec.decimal
   |>.insert ``Priority.numPrio ``Parsec.num
   |>.insert `tacticSeq ``Parsec.dummy
-  |>.insert ``Tactic.Conv.dsimp ``Parsec.dummy
-  |>.insert ``Tactic.Conv.simp ``Parsec.dummy
 
 instance : Coe Name Ident where
   coe := mkIdent
 
+open Parsec in
 partial def compileParserDescr
 (ref : Syntax) (ns : Name) (cats : ParserCategories) (descr : ParserDescr)
 : CommandElabM (Term × Array Command) :=
@@ -91,12 +91,18 @@ where
     let value := mkApp (mkCIdentFrom ref alias) #[p]
     return (value, defs)
   | .binary name p1 p2 => do
-    let some alias := aliases.find? name
-      | throwError s!"no parser alias defined for alias `{name}`"
     let (p1, defs1) ← compileDescr p1
     let (p2, defs2) ← compileDescr p2
-    let value := mkApp (mkCIdentFrom ref alias) #[p1, p2]
-    return (value, defs1.append defs2)
+    let defs := defs1.append defs2
+    if name = `andthen then
+      return (← `($p1 >> $p2), defs)
+    else if name = `orelse then
+      return (← `($p1 <|> $p2), defs)
+    else
+      let some alias := aliases.find? name
+        | throwError s!"no parser alias defined for alias `{name}`"
+      let value := mkApp (mkCIdentFrom ref alias) #[p1, p2]
+      return (value, defs)
   | .node kind prec p => do
     let (p, defs) ← compileDescr p
     let value ← ``(Parsec.leadingNode $(quote kind) $(quote prec) $p)
@@ -131,8 +137,7 @@ where
             let (p, pdefs) ← compileDescr descr
             defs := defs.append pdefs
             defs := defs.push <| mkDef pName p
-        let qps ← ps.foldlM (``(Array.push $(·) $(·))) (← ``(Array.empty))
-        let value ← ``(Parsec.category $(quote catName) $qps)
+        let value ← ``(Parsec.category $(quote catName) #[$[↑$ps],*])
         defs := defs.push <| mkDef cName value
       let value ← ``(Parsec.withPrec $(quote rbp) $cName)
       return (value, defs)
@@ -145,7 +150,7 @@ where
   | .nodeWithAntiquot _name kind p => do -- No antiquote support
     let nName := ns ++ kind
     let (p, defs) ← compileDescr p
-    let value ← ``(Parsec.node $(quote kind) ↑$p)
+    let value ← ``(Parsec.node $(quote kind) $p)
     if (← get).contains nName then
       return (mkIdent nName, defs)
     else
@@ -165,22 +170,25 @@ where
     let value ← ``(Parsec.sepBy1 $p $s $(quote allowTrailingSep))
     return (value, defs)
 
-elab "compile_parser_descr " id:ident : command => do
+syntax "compile_parser_descr " ident (" as " ident)? : command
+elab_rules : command | `(compile_parser_descr $id $[as $root?]?) => do
   let ref ← getRef
   let name ← resolveGlobalConstNoOverload id
   let (descr, _) ← IO.ofExcept <| evalParserDescr (← getEnv) (← getOptions) name
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
-  let root := name.str "parsec"
+  let root := match root? with | some r => r.getId | none => id.getId.str "parsec"
   let (p, defs) ← compileParserDescr ref root cats descr
   let defs := defs.push <| ← `(@[inline] partial def $root := $p)
   let cmd ← `(mutual $defs* end)
-  dbg_trace (← liftCoreM <| PrettyPrinter.ppCommand cmd)
+  trace[Partax.compile] s!"\n{(← liftCoreM <| PrettyPrinter.ppCommand cmd).pretty 80}"
   withMacroExpansion ref cmd <| elabCommand cmd
 
-elab "compile_parser_category " cat:ident " in " root:ident : command => do
+syntax "compile_parser_category " ident (" in " ident)? : command
+elab_rules : command | `(compile_parser_category $cat $[in $root?]?) => do
   let ref ← getRef
+  let root := match root? with | some id => id.getId | none => .anonymous
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
-  let (_, defs) ← compileParserDescr ref root.getId cats (.cat cat.getId 0)
+  let (_, defs) ← compileParserDescr ref root cats (.cat cat.getId 0)
   let cmd ← `(mutual $defs* end)
-  dbg_trace (← liftCoreM <| PrettyPrinter.ppCommand cmd)
+  trace[Partax.compile] s!"\n{(← liftCoreM <| PrettyPrinter.ppCommand cmd).pretty 80}"
   withMacroExpansion ref cmd <| elabCommand cmd

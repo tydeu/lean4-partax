@@ -8,7 +8,7 @@ import Lean.Message
 import Lean.Parser.Extension
 import Partax.Parsec.Basic
 
-open Lean Syntax
+open Lean
 
 namespace Partax
 
@@ -57,6 +57,8 @@ open Lean Parser in
 
 @[inline] def fail (errMsg : String := "parse failure") : Parsec α := do
   throw {unexpected := errMsg}
+
+@[always_inline, inline] def nop : Parsec PUnit := pure ()
 
 def throwUnexpectedPrec : Parsec PUnit :=
   throwUnexpected "unexpected token at this precedence level; consider parenthesizing the term"
@@ -123,13 +125,20 @@ def withSourceInfo (p : Parsec α) : Parsec (SourceInfo × α) := do
   let info := .original leading start trailing stop
   return (info, a)
 
+def stdId : Parsec String := do
+  extract do
+    skipSatisfy isIdFirst ["identifier start"]
+    skipMany1 <| skipSatisfy isIdRest ["identifier part"]
+
 def atomicId : Parsec String := do
   if (← attempt <| satisfy isIdBeginEscape) then
     extract do skipTillSatisfy isIdEndEscape
   else
-    extract do
+    let id ← extract do
       skipSatisfy isIdFirst ["identifier start"]
-      skipMany <| skipSatisfy isIdRest ["identifier part"]
+      skipMany1 <| skipSatisfy isIdRest ["identifier part"]
+    if id = "_" then throwUnexpected "hole" ["ident"]
+    return id
 
 def name : Parsec Name := do
   let mut n := Name.anonymous
@@ -140,11 +149,11 @@ def name : Parsec Name := do
   return n
 
 def ident : Parsec Ident := do
-  let (info, rawVal, val) ← withSourceInfo <| withSubstring <| name
+  let (info, rawVal, val) ← atomic <| withSourceInfo <| withSubstring <| name
   return ⟨.ident info rawVal val []⟩
 
 def atomOf (p : Parsec PUnit) : Parsec Syntax := do
-  let (info, val) ← withSourceInfo <| extract p
+  let (info, val) ← atomic <| withSourceInfo <| extract p
   return .atom info val
 
 abbrev TAtom (val : String) := TSyntax (Name.str .anonymous val)
@@ -191,6 +200,12 @@ def str : Parsec StrLit :=
 
 def optional (p : Parsec (Array Syntax)) : Parsec Syntax :=
   attemptD mkNullNode <| @mkNullNode <$> p
+
+def manySyntax (p : Parsec Syntax) : Parsec Syntax :=
+  @mkNullNode <$> many p
+
+def many1Syntax (p : Parsec Syntax) : Parsec Syntax :=
+  @mkNullNode <$> many1 p
 
 def sepByTrailing (initArgs : Array Syntax)
 (p : Parsec Syntax) (sep : Parsec Syntax) : Parsec Syntax := do
@@ -268,13 +283,16 @@ end Parsec
 
 open Parsec
 
+instance : Append SyntaxNodeKinds := inferInstanceAs (Append (List SyntaxNodeKind))
+
 class ParsecOrElse (α : Type) (β : Type) (γ : outParam Type) where
   orElse : Parsec α → Parsec β → Parsec γ
 
 instance : ParsecOrElse Syntax Syntax Syntax where
   orElse p1 p2 := attemptOrElse p1 p2
 
-instance : Append SyntaxNodeKinds := inferInstanceAs (Append (List SyntaxNodeKind))
+instance [ParsecOrElse α β γ] : HOrElse (Parsec α) (Parsec β) (Parsec γ) where
+  hOrElse p1 p2 := ParsecOrElse.orElse p1 (p2 ())
 
 instance : ParsecOrElse (TSyntax k1) (TSyntax k2) Syntax where
   orElse p1 p2 := attemptOrElse p1 p2
@@ -315,6 +333,9 @@ instance : ParsecOrElse (TSyntax k1) (Array (TSyntax k2)) (Array (TSyntax (k1 ++
 
 class ParsecAndThen (α : Type) (β : Type) (γ : outParam Type) where
   andThen : Parsec α → Parsec β → Parsec γ
+
+instance [ParsecAndThen α β γ] : HAndThen (Parsec α) (Parsec β) (Parsec γ) where
+  hAndThen p1 p2 := ParsecAndThen.andThen p1 (p2 ())
 
 instance : ParsecAndThen (Array Syntax) (Array Syntax) (Array Syntax) where
   andThen p1 p2 := return (← p1) ++ (← p2)
