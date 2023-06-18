@@ -8,7 +8,7 @@ import Lean.Message
 import Lean.Parser.Extension
 import Partax.Parsec.Basic
 
-open Lean
+open Lean hiding Parsec
 
 namespace Partax
 
@@ -107,7 +107,7 @@ def throwUnexpectedPrec : Parsec PUnit :=
 -- # Syntax-specific Parsers
 --------------------------------------------------------------------------------
 
-instance : Coe (Parsec Syntax) (Parsec (Array Syntax)) where
+instance : CoeOut (Parsec Syntax) (Parsec (Array Syntax)) where
   coe x := Array.singleton <$> x
 
 instance : CoeOut (Parsec (Array (TSyntax k))) (Parsec (Array Syntax)) where
@@ -278,10 +278,8 @@ def decimal : Parsec Syntax := atomOf do
 end Parsec
 
 --------------------------------------------------------------------------------
--- ## Parsec Combinators
+-- ## Combinator Classes
 --------------------------------------------------------------------------------
-
-open Parsec
 
 instance : Append SyntaxNodeKinds := inferInstanceAs (Append (List SyntaxNodeKind))
 
@@ -289,47 +287,19 @@ class ParsecOrElse (α : Type) (β : Type) (γ : outParam Type) where
   orElse : Parsec α → Parsec β → Parsec γ
 
 instance : ParsecOrElse Syntax Syntax Syntax where
-  orElse p1 p2 := attemptOrElse p1 p2
+  orElse p1 p2 := p1 <|> p2
+
+instance : ParsecOrElse (TSyntax k1) (TSyntax k2) (TSyntax (k1 ++ k2)) where
+  orElse p1 p2 := ((⟨·.raw⟩) <$> p1) <|> ((⟨·.raw⟩)  <$> p2)
+
+instance : ParsecOrElse (Array (TSyntax k1)) (TSyntax k2) (Array (TSyntax (k1 ++ k2))) where
+  orElse p1 p2 := ((·.map (⟨·.raw⟩)) <$> p1) <|> ((Array.singleton ⟨·.raw⟩) <$> p2)
+
+instance : ParsecOrElse (TSyntax k1) (Array (TSyntax k2)) (Array (TSyntax (k1 ++ k2))) where
+  orElse p1 p2 := ((Array.singleton ⟨·.raw⟩) <$> p1) <|> ((·.map (⟨·.raw⟩)) <$> p2)
 
 instance [ParsecOrElse α β γ] : HOrElse (Parsec α) (Parsec β) (Parsec γ) where
   hOrElse p1 p2 := ParsecOrElse.orElse p1 (p2 ())
-
-instance : ParsecOrElse (TSyntax k1) (TSyntax k2) Syntax where
-  orElse p1 p2 := attemptOrElse p1 p2
-
-instance : ParsecOrElse (TSyntax k1) (TSyntax k2) (Array Syntax) where
-  orElse p1 p2 := attemptOrElse p1 p2
-
-instance : ParsecOrElse (TSyntax k1) (TSyntax k2) (TSyntax (k1 ++ k2)) where
-  orElse p1 p2 := attemptOrElse ((⟨·.raw⟩) <$> p1) ((⟨·.raw⟩)  <$> p2)
-
-instance : ParsecOrElse (Array (TSyntax k)) (TSyntax k) (Array Syntax) where
-  orElse p1 p2 := attemptOrElse p1 p2
-
-instance : ParsecOrElse (TSyntax k) (Array (TSyntax k)) (Array Syntax) where
-  orElse p1 p2 := attemptOrElse p1 p2
-
-instance : ParsecOrElse (Array Syntax) (TSyntax k) (Array Syntax) where
-  orElse p1 p2 := attemptOrElse p1 p2
-
-instance : ParsecOrElse (TSyntax k) (Array Syntax) (Array Syntax) where
-  orElse p1 p2 := attemptOrElse p1 p2
-
-instance : ParsecOrElse Syntax (TSyntax k) Syntax where
-  orElse p1 p2 := attemptOrElse p1 p2
-
-instance : ParsecOrElse (TSyntax k) Syntax Syntax where
-  orElse p1 p2 := attemptOrElse p1 p2
-
-instance : ParsecOrElse (Array (TSyntax k1)) (TSyntax k2) (Array (TSyntax (k1 ++ k2))) where
-  orElse p1 p2 := attemptOrElse
-    ((·.map (⟨·.raw⟩)) <$> p1)
-    ((fun x => Array.singleton ⟨x.raw⟩) <$> p2)
-
-instance : ParsecOrElse (TSyntax k1) (Array (TSyntax k2)) (Array (TSyntax (k1 ++ k2))) where
-  orElse p1 p2 := attemptOrElse
-    ((fun x => Array.singleton ⟨x.raw⟩) <$> p1)
-    ((·.map (⟨·.raw⟩)) <$> p2)
 
 class ParsecAndThen (α : Type) (β : Type) (γ : outParam Type) where
   andThen : Parsec α → Parsec β → Parsec γ
@@ -337,47 +307,26 @@ class ParsecAndThen (α : Type) (β : Type) (γ : outParam Type) where
 instance [ParsecAndThen α β γ] : HAndThen (Parsec α) (Parsec β) (Parsec γ) where
   hAndThen p1 p2 := ParsecAndThen.andThen p1 (p2 ())
 
-instance : ParsecAndThen (Array Syntax) (Array Syntax) (Array Syntax) where
-  andThen p1 p2 := return (← p1) ++ (← p2)
-
-instance : ParsecAndThen (Array (TSyntax k1)) (Array (TSyntax k2)) (Array Syntax) where
-  andThen p1 p2 := return (← p1) ++ (← p2)
-
-instance : ParsecAndThen (Array (TSyntax k)) (Array Syntax) (Array Syntax) where
-  andThen p1 p2 := return (← p1) ++ (← p2)
-
-instance : ParsecAndThen (Array Syntax) (Array (TSyntax k)) (Array Syntax) where
-  andThen p1 p2 := return (← p1) ++ (← p2)
-
-instance : ParsecAndThen (Array Syntax) (TSyntax k) (Array Syntax) where
-  andThen p1 p2 := return (← p1).push (← p2)
-
-instance : ParsecAndThen (TSyntax k) (Array Syntax) (Array Syntax) where
-  andThen p1 p2 := return #[← p1] ++ (← p2)
-
-instance : ParsecAndThen (Array (TSyntax k1)) (TSyntax k2) (Array Syntax) where
-  andThen p1 p2 := return ((← p1) : Array Syntax).push (← p2)
-
-instance : ParsecAndThen (TSyntax k1) (Array (TSyntax k2))  (Array Syntax) where
-  andThen p1 p2 := return #[← p1] ++ (← p2)
-
-instance : ParsecAndThen (Array Syntax) Syntax (Array Syntax) where
-  andThen p1 p2 := return (← p1).push (← p2)
-
-instance : ParsecAndThen (Array (TSyntax k)) Syntax (Array Syntax) where
-  andThen p1 p2 := return ((← p1) : Array Syntax).push (← p2)
-
 instance : ParsecAndThen Syntax Syntax (Array Syntax) where
   andThen p1 p2 := return #[(← p1), (← p2)]
 
 instance : ParsecAndThen (TSyntax k1) (TSyntax k2) (Array Syntax) where
   andThen p1 p2 := return #[(← p1), (← p2)]
 
+instance : ParsecAndThen (Array Syntax) (Array Syntax) (Array Syntax) where
+  andThen p1 p2 := return (← p1) ++ (← p2)
+
 instance : ParsecAndThen (TSyntax k) Syntax (Array Syntax) where
   andThen p1 p2 := return #[(← p1), (← p2)]
 
 instance : ParsecAndThen Syntax (TSyntax k) (Array Syntax) where
   andThen p1 p2 := return #[(← p1), (← p2)]
+
+instance : ParsecAndThen (Array Syntax) (TSyntax k) (Array Syntax) where
+  andThen p1 p2 := return (← p1).push (← p2)
+
+instance : ParsecAndThen (TSyntax k) (Array Syntax) (Array Syntax) where
+  andThen p1 p2 := return #[← p1] ++ (← p2)
 
 instance : ParsecAndThen α PUnit α where
   andThen p1 p2 := do let r ← p1; p2; return r

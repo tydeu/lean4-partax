@@ -37,8 +37,6 @@ unsafe def unsafeEvalParserDescr
 def aliases :=
   ({} : NameMap Name)
   |>.insert `atomic ``Parsec.atomic
-  |>.insert `orelse ``ParsecOrElse.orElse
-  |>.insert `andthen ``ParsecAndThen.andThen
   |>.insert `optional ``Parsec.optional
   |>.insert `group ``Parsec.group
   |>.insert `many ``Parsec.manySyntax
