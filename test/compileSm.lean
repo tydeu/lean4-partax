@@ -4,57 +4,15 @@ Released under the MIT license.
 Authors: Mac Malone
 -/
 import Partax
-import Lean.Parser.Basic
+import Partax.Test
 
---------------------------------------------------------------------------------
--- ## Helpers
---------------------------------------------------------------------------------
-
+open Partax Test
 open Lean hiding Parsec
-
-instance [ToString ε] [ToString α] : Eval (Except ε α) where
-  eval f _ :=
-    match f () with
-    | .ok a => IO.print <| toString a
-    | .error e => throw <| IO.userError <| toString e
-
-open Parser in
-@[command_parser] def matchStx := leading_parser
-  "#match_stx " >> ident >> termParser >> " | " >> parserOfStack 2
-
-open Syntax in
-partial def quoteSyntax : Syntax → Term
-| .missing => mkCIdent ``missing
-| .atom _ val => mkCApp ``mkAtom #[quote val]
-| .ident _ _ val _  => mkCApp ``mkIdent #[quote val]
-| .node _ kind args =>
-    let args := Unhygienic.run `(#[$(args.map quoteSyntax),*])
-    mkCApp ``mkNode #[quote kind, args]
-
-open Syntax in
-partial def stripSyntax : Syntax → Syntax
-| .missing => .missing
-| .atom _ val => mkAtom val
-| .ident _ _ val _  => mkIdent val
-| .node _ kind args => mkNode kind <| args.map stripSyntax
-
-
-open Partax Parsec
-
-def matchStxFn (pstx : Syntax) (stx : Syntax) : Except String Syntax := do
-  let pstx := stripSyntax pstx
-  if pstx == stx then return pstx
-  throw <| s!"parsed:\n{pstx}\nexpected:\n{stx}\n"
-
-@[macro matchStx] def expandMatchStx : Macro := fun stx => do
-  let some src := stx[4].reprint | Macro.throwError "cannot reprint syntax"
-  `(#eval $(⟨stx[2]⟩).run $(quote src) |>.bind (matchStxFn · $(quoteSyntax stx[4])))
-
 open Parser
 
---------------------------------------------------------------------------------
--- ## Tests
---------------------------------------------------------------------------------
+/-! # Small Compile Tests
+Examples of small fragments of syntax.
+-/
 
 set_option trace.Partax.compile true
 
@@ -134,17 +92,9 @@ compile_parser_descr exCatP
 #match_stx exCatP exCatP.parsec | b b a
 
 /-
-Demonstration of compiling builtin Lean categories
+Demonstration of compiling small builtin Lean categories
 -/
 
 namespace ex
-
 compile_parser_category prio
 #match_stx prio prio | default + default
-
-compile_parser_category conv
-#match_stx conv conv |
-  first
-  | done
-    done
-  | {done}
