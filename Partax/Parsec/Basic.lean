@@ -3,10 +3,12 @@ Copyright (c) 2021 Mac Malone. All rights reserved.
 Released under the MIT license.
 Authors: Mac Malone
 -/
+import Lean.Util.MonadBacktrack
+
 namespace Partax
 
 --------------------------------------------------------------------------------
--- # Abstractions
+/-! # Abstractions                                                            -/
 --------------------------------------------------------------------------------
 
 /-- A monad equipped with an input string and a cursor within it. -/
@@ -32,7 +34,7 @@ class ThrowUnexpected (m : Type u → Type v) where
 /--
 A monad equipped with a `checkpoint` operation to save and restore state.
 
-Thus, it is similar in purpose to `EStateM.Backtrackable`, but does not
+Thus, it is similar in purpose to `MonadBacktrack`, but does not
 require the user to know what kind of state is being saved or restored.
 -/
 class MonadCheckpoint (m : Type u → Type v) where
@@ -56,10 +58,14 @@ instance [MonadExcept ε m] : MonadOrElse m where
 instance [Alternative m] : MonadOrElse m where
   orElse := Alternative.orElse
 
+@[always_inline, inline]
+def catchExcept [Functor m] [Pure m] [MonadExcept ε m] (x : m α) : m (Except ε α) :=
+  tryCatch (.ok <$> x) fun e => pure <| .error e
+
 namespace Parsec
 
 --------------------------------------------------------------------------------
--- ## Primitives
+/-! ## Primitives                                                             -/
 --------------------------------------------------------------------------------
 
 section
@@ -94,7 +100,7 @@ variable [ThrowUnexpected m]
 end
 
 --------------------------------------------------------------------------------
--- ## Extractors
+/-! ## Extractors                                                             -/
 --------------------------------------------------------------------------------
 
 section
@@ -121,7 +127,7 @@ variable [Monad m] [MonadInput m]
 end
 
 --------------------------------------------------------------------------------
--- # Checkpoints
+/-! # Checkpoints                                                             -/
 --------------------------------------------------------------------------------
 
 section
@@ -157,7 +163,7 @@ On failure, the parser state is reset back to before `p`. -/
 end
 
 --------------------------------------------------------------------------------
--- ## Other Combinators
+/-! ## Other Combinators                                                      -/
 --------------------------------------------------------------------------------
 
 section
@@ -168,21 +174,24 @@ variable [Monad m]
 
 variable [MonadOrElse m]
 
-def choice [ThrowUnexpected m] (ps : Array (m α)) (errMsg := "unexpected empty choice") : m α := do
-  if h : ps.size > 0 then
-    ps.toSubarray.popFront.foldr (· <|> ·) ps[0]
-  else
-    throwUnexpected errMsg
+@[inline] def choice (ps : Array (m α)) (h : ps.size > 0) : m α := do
+  ps.toSubarray.popFront.foldr (· <|> ·) ps[0]
+
+@[inline] partial def foldMany
+(init : α) (p : m α) (f : α → α → α) : m α :=
+  go init
+where
+  @[specialize] go head := p >>= (go <| f head ·) <|> return head
 
 variable [MonadCheckpoint m]
 
-partial def manyCore (p : m α) (acc : Array α) : m (Array α) := do
+@[inline] partial def manyCore (p : m α) (acc : Array α) : m (Array α) := do
   if let some a ← attempt? p then manyCore p (acc.push a) else pure acc
 
 @[inline] def many (p : m α) : m (Array α) :=
   manyCore p #[]
 
-@[inline] def many1 (p : m α) : m (Array α) := do
+@[always_inline, inline] def many1 (p : m α) : m (Array α) := do
   let a ← p; manyCore p #[a]
 
 @[inline] partial def skipMany (p : m α) : m PUnit := do
@@ -194,7 +203,7 @@ partial def manyCore (p : m α) (acc : Array α) : m (Array α) := do
 end
 
 --------------------------------------------------------------------------------
--- ## Character/Substring Matching
+/-! ## Character/Substring Matching                                           -/
 --------------------------------------------------------------------------------
 
 section
@@ -221,26 +230,87 @@ def skipSatisfy (p : Char → Bool) (expected : List String) : m PUnit :=
 @[inline] partial def skipTillSatisfy (p : Char → Bool) : m PUnit := do
   let c ← anyChar; if p c then pure () else skipTillSatisfy p
 
+/-- Skip over a character `c` in the input. -/
 @[inline] def skipChar (c : Char) : m PUnit :=
   skipSatisfy (· = c) [s!"'{c}'"]
 
+/-- Matches a single whitespace character (i.e. `Char.isWhitespace`). -/
 @[inline] def wsChar : m Char := do
   satisfy Char.isWhitespace ["whitespace character"]
 
+/-- Skip over whitespace characters in the input. -/
 @[inline] def skipWs [MonadCheckpoint m] [MonadOrElse m] : m Unit := do
   skipMany wsChar
 
+/-- Matches a single binary digit (bit). -/
 @[inline] def bit : m Char := do
   satisfy (fun c => c = '0' ∨ c = '1') ["binary digit"]
 
+/-- Matches a single octal digit (0-7). -/
 @[inline] def octDigit : m Char := do
   satisfy (fun c => '0' ≤ c ∧ c ≤ '7') ["octal digit"]
 
+/-- Matches a single decimal digit. -/
 @[inline] def digit : m Char := do
   satisfy (fun c => '0' ≤ c ∧ c ≤ '9') ["digit"]
 
+/-- Matches a single upper- or lower-case hexadecimal digit. -/
 @[inline] def hexDigit : m Char := do
   satisfy (expected := ["hex digit"]) fun c =>
     ('0' ≤ c ∧ c ≤ '9') ∨ ('a' ≤ c ∧ c ≤ 'f') ∨ ('A' ≤ c ∧ c ≤ 'F')
 
 end
+
+--------------------------------------------------------------------------------
+/-! ## Longest Match                                                          -/
+--------------------------------------------------------------------------------
+
+open Lean (MonadBacktrack saveState restoreState)
+
+/-- `Except`-like helper for `longestMatch` that equips the error with some state. -/
+inductive longestMatch.ExState (ε) (σ) (α)
+| ok (a : α) | error (e : ε) (s : σ)
+
+/--
+Tries all parsers in `ps`, searching for the last longest match.
+If the longest match succeeds, return its result. Otherwise, merge the
+errors of all failing longest match parsers into one error and throw it.
+Retains the state of the last erroring longest match parser on failure.
+-/
+@[specialize] def longestMatch
+[Monad m] [MonadInput m] [MonadExcept ε m] [MonadCheckpoint m] [MonadBacktrack σ m]
+(ps : Array (m α)) (h : ps.size > 0) (mergeErrors : ε → ε → ε) : m α :=
+  let rec @[specialize] loop (prev : longestMatch.ExState ε σ α) (prevTail) (i) :=
+    if _ : i < ps.size then
+      checkpoint fun restore => do
+      match (← catchExcept ps[i]) with
+      | .ok a =>
+        let newTail := (← getInputPos).byteIdx
+        if prevTail ≤ newTail then
+          loop (.ok a) newTail (i+1)
+        else
+          restore; loop prev prevTail (i+1)
+      | .error e2 =>
+        let newTail := (← getInputPos).byteIdx
+        match prev with
+        | .ok a => restore; loop prev newTail (i+1)
+        | .error e1 s1 =>
+          match compare prevTail newTail with
+          | .lt =>
+            let s2 ← saveState; restore
+            loop (.error e2 s2) newTail (i+1)
+          | .eq => restore; loop (.error (mergeErrors e1 e2) s1) newTail (i+1)
+          | .gt => restore; loop prev prevTail (i+1)
+    else
+      match prev with
+      | .ok a => pure a
+      | .error e s => restoreState s *> throw e
+  checkpoint fun restore => do
+  match (← catchExcept ps[0]) with
+  | .ok a =>
+    loop (.ok a) (← getInputPos).byteIdx 1
+  | .error e =>
+    let tail := (← getInputPos).byteIdx
+    let s ← saveState; restore
+    loop (.error e s) tail 1
+termination_by loop prev tail i => ps.size - i

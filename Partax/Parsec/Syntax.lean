@@ -38,10 +38,14 @@ instance : MonadInput Parsec where
 instance : MonadCheckpoint Parsec where
   checkpoint f := fun c s => let d := s; f (fun _ _ => .ok () d) c s
 
+instance : MonadBacktrack ParsecState Parsec where
+  saveState := fun _ s => .ok s s
+  restoreState s := fun _ _ => .ok () s
+
 instance : ThrowUnexpected Parsec where
   throwUnexpected unexpected expected := throw {unexpected, expected}
 
-def mergeOrElse (p1 : Parsec α) (p2 : Unit → Parsec α) : Parsec α :=
+@[inline] def mergeOrElse (p1 : Parsec α) (p2 : Unit → Parsec α) : Parsec α :=
   try p1 catch e1 => try p2 () catch e2 => throw <| e1.merge e2
 
 instance : MonadOrElse Parsec := ⟨mergeOrElse⟩
@@ -70,7 +74,7 @@ def throwUnexpectedPrec : Parsec PUnit :=
   withReader ({· with prec}) p
 
 @[inline] def checkLhsPrec (prec : Nat) : Parsec PUnit := do
-  unless (← get).lhsPrec ≤ prec do throwUnexpectedPrec
+  unless (← get).lhsPrec ≥ prec do throwUnexpectedPrec
 
 @[inline] def setLhsPrec (prec : Nat) : Parsec PUnit := do
   modify ({· with lhsPrec := prec})
@@ -263,17 +267,31 @@ def sepByIndentSemicolon (p : Parsec Syntax) : Parsec Syntax :=
 def sepBy1IndentSemicolon (p : Parsec Syntax) : Parsec Syntax :=
   sepBy1Indent p (atom ";") (allowTrailingSep := true)
 
--- Only a trivial replication (no pratt parsing)
-def category (name : Name) (kinds : Array (Parsec Syntax)) : Parsec (TSyntax name) := do
-  (⟨·⟩) <$> choice kinds s!"attempted to parse empty category '{name}'"
+@[inline] partial def trailingLoop (head : Syntax)
+(trailing : Array (Parsec Syntax)) (h : trailing.size > 0) : Parsec Syntax :=
+  step head
+where
+  step head := do
+    let iniPos ← getInputPos
+    checkpoint fun restore => do
+    match (← catchExcept <| longestMatch trailing h Parser.Error.merge) with
+    | .ok tail =>
+      let node := (.node .none tail.getKind <| #[head] ++ tail.getArgs)
+      -- break the loop if a successful trailing parser does not consume anything
+      if iniPos = (← getInputPos) then return node else step node
+    | .error e =>
+      if iniPos < (← getInputPos) then throw e else restore; return head
 
--- Just for testing purposes
-
-def term : Parsec Term :=
-  category `term #[ident, num, str]
-
-def decimal : Parsec Syntax := atomOf do
-  skipMany digit
+/-- Pratt parse a category with the given `leading` and `trailing` parsers. -/
+def category (name : Name) (leading trailing : Array (Parsec Syntax)) : Parsec (TSyntax name) := do
+  if h : leading.size > 0 then
+    let head ← longestMatch leading h Parser.Error.merge
+    if h : trailing.size > 0 then
+      (⟨·⟩) <$> trailingLoop head trailing h
+    else
+      return ⟨head⟩
+  else
+    throwUnexpected s!"attempted to parse category '{name}' with no leading parsers"
 
 end Parsec
 

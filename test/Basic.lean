@@ -140,8 +140,7 @@ Demonstration of compiling builtin Lean categories
 namespace ex
 
 compile_parser_category prio
-#match_stx prio prio | default
--- #match_stx prio prio | default + default
+#match_stx prio prio | default + default
 
 compile_parser_category conv
 #match_stx conv conv |

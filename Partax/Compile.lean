@@ -31,8 +31,19 @@ unsafe def unsafeEvalParserDescr
 @[implemented_by unsafeEvalParserDescr] opaque evalParserDescr
 (env : Environment) (opts : Options) (name : Name) : Except String (ParserDescr × Bool)
 
-@[inline] def Parsec.dummy (errMsg : String := "dummy parser") : Parsec Syntax := do
+-- Just for testing purposes
+namespace Parsec
+
+def term : Parsec Term :=
+  Parsec.category `term #[ident, num, str] #[]
+
+def decimal : Parsec Syntax := atomOf do
+  skipMany digit
+
+@[inline] def dummy (errMsg : String := "dummy parser") : Parsec Syntax := do
   throw {unexpected := errMsg}
+
+end Parsec
 
 def aliases :=
   ({} : NameMap Name)
@@ -119,23 +130,29 @@ where
     if let some alias := aliases.find? catName then
       return (mkCIdentFrom ref alias, {})
     else if let some cat := cats.find? catName then
-      let mut ps := #[]
       let mut defs := #[]
+      let mut leadingPs := #[]
+      let mut trailingPs := #[]
       let cName := ns ++ catName
       unless (← get).contains catName do
         modify (·.insert catName)
         for (k, _) in cat.kinds do
           let pName := cName ++ k
-          ps := ps.push <| mkIdentFrom ref pName
+          let pId := mkIdentFrom ref pName
           let name ← resolveGlobalConstNoOverload (mkIdentFrom ref k)
           if let some alias := aliases.find? name then
+            leadingPs := leadingPs.push pId
             defs := defs.push <| mkInlineDef pName (mkCIdentFrom ref alias)
           else
-            let (descr, _) ← IO.ofExcept <| evalParserDescr (← getEnv) (← getOptions) name
+            let (descr, trailing) ← IO.ofExcept <| evalParserDescr (← getEnv) (← getOptions) name
+            if trailing then
+              trailingPs := trailingPs.push pId
+            else
+              leadingPs := leadingPs.push pId
             let (p, pdefs) ← compileDescr descr
             defs := defs.append pdefs
             defs := defs.push <| mkDef pName p
-        let value ← ``(Parsec.category $(quote catName) #[$[↑$ps],*])
+        let value ← ``(Parsec.category $(quote catName) #[$[↑$leadingPs],*] #[$[↑$trailingPs],*])
         defs := defs.push <| mkDef cName value
       let value ← ``(Parsec.withPrec $(quote rbp) $cName)
       return (value, defs)
