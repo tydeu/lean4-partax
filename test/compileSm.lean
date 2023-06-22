@@ -3,12 +3,9 @@ Copyright (c) 2021 Mac Malone. All rights reserved.
 Released under the MIT license.
 Authors: Mac Malone
 -/
-import Partax
 import Partax.Test
 
-open Partax Test
-open Lean hiding Parsec
-open Parser
+open Partax Test Lean Parser
 
 /-! # Small Compile Tests
 Examples of small fragments of syntax.

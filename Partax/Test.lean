@@ -3,8 +3,8 @@ Copyright (c) 2023 Mac Malone. All rights reserved.
 Released under the MIT license.
 Authors: Mac Malone
 -/
+import Partax
 import Lean.Parser
-import Partax.Parsec
 
 open Lean
 

@@ -6,7 +6,7 @@ Authors: Mac Malone
 import Lean.Parser.Basic
 import Lean.Elab.ElabRules
 import Lean.PrettyPrinter
-import Partax.Parsec
+import Partax.LParse
 import Partax.Trace
 
 open Lean Elab Term Syntax Parser Command
@@ -32,48 +32,48 @@ unsafe def unsafeEvalParserDescr
 (env : Environment) (opts : Options) (name : Name) : Except String (ParserDescr × Bool)
 
 -- Just for testing purposes
-namespace Parsec
+namespace LParse
 
-def term : Parsec Term :=
-  Parsec.category `term #[ident, num, str] #[]
+def term : LParse Term :=
+  LParse.category `term #[ident, num, str] #[]
 
-def decimal : Parsec Syntax := atomOf do
+def decimal : LParse Syntax := atomOf do
   skipMany digit
 
-@[inline] def dummy (errMsg : String := "dummy parser") : Parsec Syntax := do
+@[inline] def dummy (errMsg : String := "dummy parser") : LParse Syntax := do
   throw {unexpected := errMsg}
 
-end Parsec
+end LParse
 
 def aliases :=
   ({} : NameMap Name)
-  |>.insert `atomic ``Parsec.atomic
-  |>.insert `optional ``Parsec.optional
-  |>.insert `group ``Parsec.group
-  |>.insert `many ``Parsec.manySyntax
-  |>.insert `many1 ``Parsec.many1Syntax
-  |>.insert `sepByIndentSemicolon ``Parsec.sepByIndentSemicolon
-  |>.insert `sepBy1IndentSemicolon ``Parsec.sepBy1IndentSemicolon
-  |>.insert `num ``Parsec.num
-  |>.insert `ident ``Parsec.ident
-  |>.insert `hole ``Parsec.hole
-  |>.insert `withPosition ``Parsec.withPosition
-  |>.insert `withoutPosition ``Parsec.withoutPosition
-  |>.insert `checkColGe ``Parsec.checkColGe
-  |>.insert `checkColGt ``Parsec.checkColGt
-  |>.insert `checkColEq ``Parsec.checkColEq
-  |>.insert `colGe ``Parsec.checkColGe
-  |>.insert `colGt ``Parsec.checkColGt
-  |>.insert `colEq ``Parsec.checkColEq
-  |>.insert `ppSpace ``Parsec.nop
+  |>.insert `atomic ``atomic
+  |>.insert `optional ``LParse.optional
+  |>.insert `group ``LParse.group
+  |>.insert `many ``LParse.manySyntax
+  |>.insert `many1 ``LParse.many1Syntax
+  |>.insert `sepByIndentSemicolon ``LParse.sepByIndentSemicolon
+  |>.insert `sepBy1IndentSemicolon ``LParse.sepBy1IndentSemicolon
+  |>.insert `num ``LParse.num
+  |>.insert `ident ``LParse.ident
+  |>.insert `hole ``LParse.hole
+  |>.insert `withPosition ``LParse.withPosition
+  |>.insert `withoutPosition ``LParse.withoutPosition
+  |>.insert `checkColGe ``LParse.checkColGe
+  |>.insert `checkColGt ``LParse.checkColGt
+  |>.insert `checkColEq ``LParse.checkColEq
+  |>.insert `colGe ``LParse.checkColGe
+  |>.insert `colGt ``LParse.checkColGt
+  |>.insert `colEq ``LParse.checkColEq
+  |>.insert `ppSpace ``LParse.nop
   |>.insert `ppDedent ``id
-  |>.insert `ppLine ``Parsec.nop
+  |>.insert `ppLine ``LParse.nop
   |>.insert `patternIgnore ``id
   -- Placeholders
-  |>.insert `term ``Parsec.term
-  |>.insert `decimal ``Parsec.decimal
-  |>.insert ``Priority.numPrio ``Parsec.num
-  |>.insert `tacticSeq ``Parsec.dummy
+  |>.insert `term ``LParse.term
+  |>.insert `decimal ``LParse.decimal
+  |>.insert ``Priority.numPrio ``LParse.num
+  |>.insert `tacticSeq ``LParse.dummy
 
 instance : Coe Name Ident where
   coe := mkIdent
@@ -83,7 +83,7 @@ def stripUpperPrefix : Name → Name
 | .str p s => if s.get 0 |>.isUpper then .anonymous else .str (stripUpperPrefix p) s
 | .num p n => .num (stripUpperPrefix p) n
 
-open Parsec in
+open LParse in
 partial def compileParserDescr
 (ref : Syntax) (rootNs : Name) (cats : ParserCategories) (descr : ParserDescr)
 : CommandElabM (Term × Array Command) :=
@@ -119,17 +119,17 @@ where
       return (value, defs)
   | .node kind prec p => do
     let (p, defs) ← compileDescr ns p
-    let value ← ``(Parsec.leadingNode $(quote kind) $(quote prec) $p)
+    let value ← ``(LParse.leadingNode $(quote kind) $(quote prec) $p)
     return (value, defs)
   | .trailingNode kind prec lhsPrec p => do -- Does not really work (missing LHS)
     let (p, defs) ← compileDescr ns p
-    let value ← ``(Parsec.trailingNode $(quote kind) $(quote prec) $(quote lhsPrec) $p)
+    let value ← ``(LParse.trailingNode $(quote kind) $(quote prec) $(quote lhsPrec) $p)
     return (value, defs)
   | .symbol val => do
-    let value ← ``(Parsec.atom $(quote val.trim))
+    let value ← ``(LParse.atom $(quote val.trim))
     return (value, {})
   | .nonReservedSymbol val _includeIdent => do
-    let value ← ``(Parsec.atom $(quote val.trim))
+    let value ← ``(LParse.atom $(quote val.trim))
     return (value, {})
   | .cat catName rbp => do -- Requires `partial`
     if let some alias := aliases.find? catName then
@@ -157,9 +157,9 @@ where
             let (p, pdefs) ← compileDescr cName descr
             defs := defs.append pdefs
             defs := defs.push <| mkDef pName p
-        let value ← ``(Parsec.category $(quote catName) #[$[↑$leadingPs],*] #[$[↑$trailingPs],*])
+        let value ← ``(LParse.category $(quote catName) #[$[↑$leadingPs],*] #[$[↑$trailingPs],*])
         defs := defs.push <| mkDef cName value
-      let value ← ``(Parsec.withPrec $(quote rbp) $cName)
+      let value ← ``(LParse.withPrec $(quote rbp) $cName)
       return (value, defs)
     else
       throwError s!"no parser alias defined for unknown category `{catName}`"
@@ -170,7 +170,7 @@ where
   | .nodeWithAntiquot _name kind p => do -- No antiquote support
     let nName := ns ++ stripUpperPrefix kind
     let (p, defs) ← compileDescr ns p
-    let value ← ``(Parsec.node $(quote kind) $p)
+    let value ← ``(LParse.node $(quote kind) $p)
     if (← get).contains nName then
       return (mkIdent nName, defs)
     else
@@ -181,13 +181,13 @@ where
     let (p, pdefs) ← compileDescr ns p
     let (s, sdefs) ← compileDescr ns psep
     let defs := pdefs.append sdefs
-    let value ← ``(Parsec.sepBy $p $s $(quote allowTrailingSep))
+    let value ← ``(LParse.sepBy $p $s $(quote allowTrailingSep))
     return (value, defs)
   | .sepBy1 p _sep psep allowTrailingSep => do
     let (p, pdefs) ← compileDescr ns p
     let (s, sdefs) ← compileDescr ns psep
     let defs := pdefs.append sdefs
-    let value ← ``(Parsec.sepBy1 $p $s $(quote allowTrailingSep))
+    let value ← ``(LParse.sepBy1 $p $s $(quote allowTrailingSep))
     return (value, defs)
 
 syntax "compile_parser_descr " ident (" as " ident)? : command

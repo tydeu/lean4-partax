@@ -62,8 +62,6 @@ instance [Alternative m] : MonadOrElse m where
 def catchExcept [Functor m] [Pure m] [MonadExcept ε m] (x : m α) : m (Except ε α) :=
   tryCatch (.ok <$> x) fun e => pure <| .error e
 
-namespace Parsec
-
 --------------------------------------------------------------------------------
 /-! ## Primitives                                                             -/
 --------------------------------------------------------------------------------
