@@ -78,17 +78,22 @@ def aliases :=
 instance : Coe Name Ident where
   coe := mkIdent
 
+def stripUpperPrefix : Name → Name
+| .anonymous => .anonymous
+| .str p s => if s.get 0 |>.isUpper then .anonymous else .str (stripUpperPrefix p) s
+| .num p n => .num (stripUpperPrefix p) n
+
 open Parsec in
 partial def compileParserDescr
-(ref : Syntax) (ns : Name) (cats : ParserCategories) (descr : ParserDescr)
+(ref : Syntax) (rootNs : Name) (cats : ParserCategories) (descr : ParserDescr)
 : CommandElabM (Term × Array Command) :=
-  StateT.run' (s := NameSet.empty) do compileDescr descr
+  StateT.run' (s := NameSet.empty) do compileDescr rootNs descr
 where
   mkDef (name : Name) (value : Term) : Command :=
     Unhygienic.run do withRef ref `(partial def $name := $value)
   mkInlineDef (name : Name) (value : Term) : Command :=
     Unhygienic.run do withRef ref `(@[inline] partial def $name  := $value)
-  compileDescr
+  compileDescr ns
   | .const name => do
     let some alias := aliases.find? name
       | throwError s!"no parser alias defined for alias `{name}`"
@@ -96,12 +101,12 @@ where
   | .unary name p => do
     let some alias := aliases.find? name
       | throwError s!"no parser alias defined for alias `{name}`"
-    let (p, defs) ← compileDescr p
+    let (p, defs) ← compileDescr ns p
     let value := mkApp (mkCIdentFrom ref alias) #[p]
     return (value, defs)
   | .binary name p1 p2 => do
-    let (p1, defs1) ← compileDescr p1
-    let (p2, defs2) ← compileDescr p2
+    let (p1, defs1) ← compileDescr ns p1
+    let (p2, defs2) ← compileDescr ns p2
     let defs := defs1.append defs2
     if name = `andthen then
       return (← `($p1 >> $p2), defs)
@@ -113,11 +118,11 @@ where
       let value := mkApp (mkCIdentFrom ref alias) #[p1, p2]
       return (value, defs)
   | .node kind prec p => do
-    let (p, defs) ← compileDescr p
+    let (p, defs) ← compileDescr ns p
     let value ← ``(Parsec.leadingNode $(quote kind) $(quote prec) $p)
     return (value, defs)
   | .trailingNode kind prec lhsPrec p => do -- Does not really work (missing LHS)
-    let (p, defs) ← compileDescr p
+    let (p, defs) ← compileDescr ns p
     let value ← ``(Parsec.trailingNode $(quote kind) $(quote prec) $(quote lhsPrec) $p)
     return (value, defs)
   | .symbol val => do
@@ -133,11 +138,11 @@ where
       let mut defs := #[]
       let mut leadingPs := #[]
       let mut trailingPs := #[]
-      let cName := ns ++ catName
+      let cName := rootNs ++ catName
       unless (← get).contains catName do
         modify (·.insert catName)
         for (k, _) in cat.kinds do
-          let pName := cName ++ k
+          let pName := cName ++ stripUpperPrefix k
           let pId := mkIdentFrom ref pName
           let name ← resolveGlobalConstNoOverload (mkIdentFrom ref k)
           if let some alias := aliases.find? name then
@@ -149,7 +154,7 @@ where
               trailingPs := trailingPs.push pId
             else
               leadingPs := leadingPs.push pId
-            let (p, pdefs) ← compileDescr descr
+            let (p, pdefs) ← compileDescr cName descr
             defs := defs.append pdefs
             defs := defs.push <| mkDef pName p
         let value ← ``(Parsec.category $(quote catName) #[$[↑$leadingPs],*] #[$[↑$trailingPs],*])
@@ -163,8 +168,8 @@ where
       | throwError s!"no parser alias defined for parser `{name}`"
     return (mkCIdentFrom ref alias, {})
   | .nodeWithAntiquot _name kind p => do -- No antiquote support
-    let nName := ns ++ kind
-    let (p, defs) ← compileDescr p
+    let nName := ns ++ stripUpperPrefix kind
+    let (p, defs) ← compileDescr ns p
     let value ← ``(Parsec.node $(quote kind) $p)
     if (← get).contains nName then
       return (mkIdent nName, defs)
@@ -173,14 +178,14 @@ where
       let defs := defs.push <| mkDef nName value
       return (mkIdent nName, defs)
   | .sepBy p _sep psep allowTrailingSep => do
-    let (p, pdefs) ← compileDescr p
-    let (s, sdefs) ← compileDescr psep
+    let (p, pdefs) ← compileDescr ns p
+    let (s, sdefs) ← compileDescr ns psep
     let defs := pdefs.append sdefs
     let value ← ``(Parsec.sepBy $p $s $(quote allowTrailingSep))
     return (value, defs)
   | .sepBy1 p _sep psep allowTrailingSep => do
-    let (p, pdefs) ← compileDescr p
-    let (s, sdefs) ← compileDescr psep
+    let (p, pdefs) ← compileDescr ns p
+    let (s, sdefs) ← compileDescr ns psep
     let defs := pdefs.append sdefs
     let value ← ``(Parsec.sepBy1 $p $s $(quote allowTrailingSep))
     return (value, defs)
@@ -195,7 +200,7 @@ elab_rules : command | `(compile_parser_descr $id $[as $root?]?) => do
   let (p, defs) ← compileParserDescr ref root cats descr
   let defs := defs.push <| ← `(@[inline] partial def $root := $p)
   let cmd ← `(mutual $defs* end)
-  trace[Partax.compile] s!"\n{(← liftCoreM <| PrettyPrinter.ppCommand cmd).pretty 80}"
+  trace[Partax.compile] s!"\n{(← liftCoreM <| PrettyPrinter.ppCommand cmd).pretty 90}"
   withMacroExpansion ref cmd <| elabCommand cmd
 
 syntax "compile_parser_category " ident (" in " ident)? : command
@@ -205,5 +210,5 @@ elab_rules : command | `(compile_parser_category $cat $[in $root?]?) => do
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
   let (_, defs) ← compileParserDescr ref root cats (.cat cat.getId 0)
   let cmd ← `(mutual $defs* end)
-  trace[Partax.compile] s!"\n{(← liftCoreM <| PrettyPrinter.ppCommand cmd).pretty 80}"
+  trace[Partax.compile] s!"\n{(← liftCoreM <| PrettyPrinter.ppCommand cmd).pretty 90}"
   withMacroExpansion ref cmd <| elabCommand cmd

@@ -16,8 +16,6 @@ set_option trace.Partax.compile true
 Examples of compiling large Lean categories.
 -/
 
-namespace ex
-
 compile_parser_category conv
 #match_stx conv conv |
   first
