@@ -25,6 +25,7 @@ structure LParseContext extends InputContext where
 structure LParseState where
   lhsPrec : Nat := 0
   pos : String.Pos := 0
+  prevWs : Substring := "".toSubstring
 
 /-- Combinatorial, monadic parser for Lean-style parsing. -/
 abbrev LParse := ReaderT LParseContext <| EStateM Error LParseState
@@ -51,10 +52,16 @@ instance : ThrowUnexpected LParse where
 
 instance : MonadOrElse LParse := ⟨mergeOrElse⟩
 
-open Lean Parser in
-@[inline] nonrec def run (p : LParse α) (input : String) : Except String α :=
-  let ctx := {toInputContext := mkInputContext input "<string>", prec := 0}
-  match p.run ctx |>.run {} with
+@[inline] def consumeWs : LParse Substring := do
+  let ws ← extractSub skipWs
+  modify ({· with prevWs := ws})
+  return ws
+
+open Parser in
+nonrec def run (p : LParse α)
+(input : String) (fileName := "<string>") (rbp := 0) : Except String α :=
+  let ctx := {toInputContext := mkInputContext input fileName, prec := rbp}
+  match (consumeWs *> p).run ctx |>.run {} with
   | .ok a _ => .ok a
   | .error e s =>
     let pos := ctx.fileMap.toPosition s.pos
@@ -105,14 +112,16 @@ def throwUnexpectedPrec : LParse PUnit :=
 @[inline] def checkColEq (errorMsg : String := "checkColEq") : LParse PUnit := do
   compareToSavedPos (·.column = ·.column) errorMsg
 
+@[inline] def getWsBefore : LParse Substring := (·.prevWs) <$> get
+
 @[inline] def checkWsBefore (errorMsg : String := "space before") : LParse PUnit := do
-  nop -- TODO: stub
+  if (← getWsBefore).isEmpty then fail errorMsg
 
 @[inline] def checkNoWsBefore (errorMsg : String := "no space before") : LParse PUnit := do
-  nop -- TODO: stub
+  unless (← getWsBefore).isEmpty do fail errorMsg
 
 @[inline] def checkLinebreakBefore (errorMsg : String := "line break") : LParse PUnit := do
-  nop -- TODO: stub
+  unless (← getWsBefore).contains '\n' do fail errorMsg
 
 --------------------------------------------------------------------------------
 -- # Syntax-specific Parsers
@@ -127,12 +136,14 @@ instance : CoeOut (LParse (Array (TSyntax k))) (LParse (Array Syntax)) where
 instance : CoeOut (LParse (TSyntax k)) (LParse Syntax) where
   coe x := x
 
+/- Like Lean, assumes all leading whitespace has already been consumed. -/
 def withSourceInfo (p : LParse α) : LParse (SourceInfo × α) := do
-  let leading ← extractSub skipWs
   let start ← getInputPos
+  let leading : Substring :=
+    {str := ← getInput, startPos := (← getWsBefore).stopPos, stopPos := start}
   let a ← p
   let stop ← getInputPos
-  let trailing ← extractSub skipWs
+  let trailing ← consumeWs
   let info := .original leading start trailing stop
   return (info, a)
 

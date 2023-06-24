@@ -58,6 +58,16 @@ compile_parser ex2
 #match_stx ex2 ex2.lParse | foo baz baz
 
 /-
+Example of whitespace sensitive parsers
+-/
+syntax exWs := num ws ident
+syntax exNoWs := atomic(num noWs ident)
+syntax exWsOrNoWs := exNoWs <|> exWs
+compile_parser exWsOrNoWs
+#match_stx exWsOrNoWs exWsOrNoWs.lParse | 50ws
+#match_stx exWsOrNoWs exWsOrNoWs.lParse | 50 ws
+
+/-
 Example of compiling a real parser
 -/
 syntax exP := Command.infix
