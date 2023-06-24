@@ -105,7 +105,13 @@ def throwUnexpectedPrec : LParse PUnit :=
 @[inline] def checkColEq (errorMsg : String := "checkColEq") : LParse PUnit := do
   compareToSavedPos (·.column = ·.column) errorMsg
 
-@[inline] def checkLinebreakBefore : LParse PUnit := do
+@[inline] def checkWsBefore (errorMsg : String := "space before") : LParse PUnit := do
+  nop -- TODO: stub
+
+@[inline] def checkNoWsBefore (errorMsg : String := "no space before") : LParse PUnit := do
+  nop -- TODO: stub
+
+@[inline] def checkLinebreakBefore (errorMsg : String := "line break") : LParse PUnit := do
   nop -- TODO: stub
 
 --------------------------------------------------------------------------------
@@ -166,6 +172,12 @@ abbrev TAtom (val : String) := TSyntax (Name.str .anonymous val)
 def atom (val : String) : LParse (TAtom val) :=
   (⟨·⟩) <$> atomOf (skipString val)
 
+@[inline] def symbol (sym : String) : LParse (TAtom sym) :=
+  atom sym
+
+@[inline] def nonReservedSymbol (sym : String) (_includeIdent := false) : LParse (TAtom sym) :=
+  atom sym
+
 def node (kind : SyntaxNodeKind) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
   return ⟨.node SourceInfo.none kind (← p)⟩
 
@@ -181,7 +193,7 @@ def group (p : LParse (Array Syntax)) : LParse Syntax :=
 def hole : LParse (TSyntax `Lean.Parser.Term.hole) :=
   node `Lean.Parser.Term.hole <| atom "_"
 
-def num : LParse NumLit :=
+def numLit : LParse NumLit :=
   node numLitKind <| Array.singleton <$> atomOf do
     let c ← digit
     if c = '0' then
@@ -194,7 +206,7 @@ def num : LParse NumLit :=
     else
       skipMany digit
 
-def str : LParse StrLit :=
+def strLit : LParse StrLit :=
   node strLitKind <| Array.singleton <$> atomOf do
     skipChar '"'
     repeat
@@ -345,6 +357,12 @@ instance : LParseAndThen (Array Syntax) (TSyntax k) (Array Syntax) where
   andThen p1 p2 := return (← p1).push (← p2)
 
 instance : LParseAndThen (TSyntax k) (Array Syntax) (Array Syntax) where
+  andThen p1 p2 := return #[← p1] ++ (← p2)
+
+instance : LParseAndThen (Array Syntax) Syntax (Array Syntax) where
+  andThen p1 p2 := return (← p1).push (← p2)
+
+instance : LParseAndThen Syntax (Array Syntax) (Array Syntax) where
   andThen p1 p2 := return #[← p1] ++ (← p2)
 
 instance : LParseAndThen α PUnit α where

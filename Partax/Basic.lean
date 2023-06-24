@@ -175,12 +175,6 @@ variable [MonadOrElse m]
 @[inline] def choice (ps : Array (m α)) (h : ps.size > 0) : m α := do
   ps.toSubarray.popFront.foldr (· <|> ·) ps[0]
 
-@[inline] partial def foldMany
-(init : α) (p : m α) (f : α → α → α) : m α :=
-  go init
-where
-  @[specialize] go head := p >>= (go <| f head ·) <|> return head
-
 variable [MonadCheckpoint m]
 
 @[inline] partial def manyCore (p : m α) (acc : Array α) : m (Array α) := do
@@ -265,50 +259,48 @@ end
 
 open Lean (MonadBacktrack saveState restoreState)
 
-/-- `Except`-like helper for `longestMatch` that equips the error with some state. -/
-inductive longestMatch.ExState (ε) (σ) (α)
-| ok (a : α) | error (e : ε) (s : σ)
-
 /--
 Tries all parsers in `ps`, searching for the last longest match.
-If the longest match succeeds, return its result. Otherwise, merge the
-errors of all failing longest match parsers into one error and throw it.
-Retains the state of the last erroring longest match parser on failure.
+If the last longest match succeeded, restore its state and return its result.
+Otherwise, merge the errors of all failing longest match parsers into one error
+and throw it, restoring the state of the last erroring longest match parser.
 -/
 @[specialize] def longestMatch
 [Monad m] [MonadInput m] [MonadExcept ε m] [MonadCheckpoint m] [MonadBacktrack σ m]
 (ps : Array (m α)) (h : ps.size > 0) (mergeErrors : ε → ε → ε) : m α :=
-  let rec @[specialize] loop (prev : longestMatch.ExState ε σ α) (prevTail) (i) :=
+  let rec @[specialize] loop (prev : EStateM.Result ε σ α) (prevTail) (i) :=
     if _ : i < ps.size then
       checkpoint fun restore => do
       match (← catchExcept ps[i]) with
       | .ok a =>
         let newTail := (← getInputPos).byteIdx
         if prevTail ≤ newTail then
-          loop (.ok a) newTail (i+1)
+          let s ← saveState; restore
+          loop (.ok a s) newTail (i+1)
         else
           restore; loop prev prevTail (i+1)
       | .error e2 =>
         let newTail := (← getInputPos).byteIdx
         match prev with
-        | .ok a => restore; loop prev newTail (i+1)
-        | .error e1 s1 =>
+        | .ok .. => restore; loop prev newTail (i+1)
+        | .error e1 _ =>
           match compare prevTail newTail with
           | .lt =>
             let s2 ← saveState; restore
             loop (.error e2 s2) newTail (i+1)
-          | .eq => restore; loop (.error (mergeErrors e1 e2) s1) newTail (i+1)
+          | .eq =>
+            let s2 ← saveState; restore
+            loop (.error (mergeErrors e1 e2) s2) newTail (i+1)
           | .gt => restore; loop prev prevTail (i+1)
     else
       match prev with
-      | .ok a => pure a
+      | .ok a s => restoreState s *> pure a
       | .error e s => restoreState s *> throw e
   checkpoint fun restore => do
-  match (← catchExcept ps[0]) with
-  | .ok a =>
-    loop (.ok a) (← getInputPos).byteIdx 1
-  | .error e =>
-    let tail := (← getInputPos).byteIdx
-    let s ← saveState; restore
-    loop (.error e s) tail 1
+  let x ← catchExcept ps[0]
+  let tail := (← getInputPos).byteIdx
+  let s ← saveState; restore
+  match x with
+  | .ok a => loop (.ok a s) tail 1
+  | .error e => loop (.error e s) tail 1
 termination_by loop prev tail i => ps.size - i
