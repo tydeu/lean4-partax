@@ -26,7 +26,8 @@ class ThrowUnexpected (m : Type u → Type v) where
 @[macro_inline] def throwUnexpected [ThrowUnexpected m] (msg : String) (expected : List String := []) : m α :=
   ThrowUnexpected.throwUnexpected msg expected
 
-@[noinline] def unexpectedEOIMessage : String := "unexpected end of input"
+@[noinline] def unexpectedEOIMessage : String :=
+  "unexpected end of input"
 
 @[inline] def throwUnexpectedEOI [ThrowUnexpected m] (expected : List String := []) : m α :=
   throwUnexpected unexpectedEOIMessage expected
@@ -82,6 +83,11 @@ variable [Monad m] [MonadInput m]
   let c ← peek; skip; return c
 
 variable [ThrowUnexpected m]
+
+/-- Throw if not at end-of-input. -/
+@[inline] def checkEOI : m PUnit := do
+  unless (← getInput).atEnd (← getInputPos) do
+    throwUnexpected s!"unexpected '{← peek}'" ["end of input"]
 
 /-- Throw if at end-of-input. -/
 @[inline] def checkNotEOI : m PUnit := do

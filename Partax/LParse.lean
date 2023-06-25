@@ -61,7 +61,7 @@ open Parser in
 nonrec def run (p : LParse α)
 (input : String) (fileName := "<string>") (rbp := 0) : Except String α :=
   let ctx := {toInputContext := mkInputContext input fileName, prec := rbp}
-  match (consumeWs *> p).run ctx |>.run {} with
+  match (consumeWs *> p <* checkEOI).run ctx |>.run {} with
   | .ok a _ => .ok a
   | .error e s =>
     let pos := ctx.fileMap.toPosition s.pos
@@ -72,8 +72,11 @@ nonrec def run (p : LParse α)
 
 @[always_inline, inline] def nop : LParse PUnit := pure ()
 
-def throwUnexpectedPrec : LParse PUnit :=
-  throwUnexpected "unexpected token at this precedence level; consider parenthesizing the term"
+@[noinline] def unexpectedPrecMessage : String :=
+  "unexpected token at this precedence level; consider parenthesizing the term"
+
+@[inline] def throwUnexpectedPrec : LParse PUnit :=
+  throwUnexpected unexpectedPrecMessage
 
 @[inline] def checkPrec (prec : Nat) : LParse PUnit := do
   unless (← read).prec ≤ prec do throwUnexpectedPrec

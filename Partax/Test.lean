@@ -12,6 +12,10 @@ namespace Partax.Test
 
 /-! # Test Utilities -/
 
+def flipExcept : Except ε α → Except α ε
+| .ok a => .error a
+| .error e => .ok e
+
 instance [ToString ε] [ToString α] : Eval (Except ε α) where
   eval f _ :=
     match f () with
@@ -31,18 +35,11 @@ partial def quoteSyntax : Syntax → Term
     let args := Unhygienic.run `(#[$(args.map quoteSyntax),*])
     mkCApp ``mkNode #[quote kind, args]
 
-open Syntax in
-partial def stripSyntax : Syntax → Syntax
-| .missing => .missing
-| .atom _ val => mkAtom val
-| .ident _ _ val _  => mkIdent val
-| .node _ kind args => mkNode kind <| args.map stripSyntax
-
 def matchStxFn (pstx : Syntax) (stx : Syntax) : Except String Syntax := do
-  let pstx := stripSyntax pstx
   if pstx == stx then return pstx
   throw <| s!"parsed:\n{pstx}\nexpected:\n{stx}\n"
 
 @[macro matchStx] def expandMatchStx : Macro := fun stx => do
-  let some src := stx[4].reprint | Macro.throwError "cannot reprint syntax"
+  let some src := stx[4].updateTrailing "".toSubstring |>.reprint
+    | Macro.throwError "cannot reprint syntax"
   `(#eval $(⟨stx[2]⟩).run $(quote src) |>.bind (matchStxFn · $(quoteSyntax stx[4])))
