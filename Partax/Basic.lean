@@ -27,7 +27,7 @@ class ThrowUnexpected (m : Type u → Type v) where
   ThrowUnexpected.throwUnexpected msg expected
 
 @[noinline] def unexpectedEOIMessage : String :=
-  "unexpected end of input"
+  "unexpected end-of-input"
 
 @[inline] def throwUnexpectedEOI [ThrowUnexpected m] (expected : List String := []) : m α :=
   throwUnexpected unexpectedEOIMessage expected
@@ -59,10 +59,6 @@ instance [MonadExcept ε m] : MonadOrElse m where
 instance [Alternative m] : MonadOrElse m where
   orElse := Alternative.orElse
 
-@[always_inline, inline]
-def catchExcept [Functor m] [Pure m] [MonadExcept ε m] (x : m α) : m (Except ε α) :=
-  tryCatch (.ok <$> x) fun e => pure <| .error e
-
 --------------------------------------------------------------------------------
 /-! ## Primitives                                                             -/
 --------------------------------------------------------------------------------
@@ -82,24 +78,28 @@ variable [Monad m] [MonadInput m]
 @[inline] def next : m Char := do
   let c ← peek; skip; return c
 
+/-- Check if the parser is at the end of input. -/
+@[inline] def getIsEOI : m Bool := do
+  return (← getInput).atEnd (← getInputPos)
+
 variable [ThrowUnexpected m]
 
 /-- Throw if not at end-of-input. -/
 @[inline] def checkEOI : m PUnit := do
-  unless (← getInput).atEnd (← getInputPos) do
-    throwUnexpected s!"unexpected '{← peek}'" ["end of input"]
+  unless (← getIsEOI) do
+    throwUnexpected s!"unexpected '{← peek}'" ["end-of-input"]
 
 /-- Throw if at end-of-input. -/
-@[inline] def checkNotEOI : m PUnit := do
-  if (← getInput).atEnd (← getInputPos) then throwUnexpectedEOI
+@[inline] def checkNotEOI (expected : List String := []) : m PUnit := do
+  if (← getIsEOI) then throwUnexpectedEOI expected
 
 /-- Advance the parser one character. Throws on end-of-input.  -/
-@[inline] def skip1 : m PUnit := do
-  checkNotEOI; skip
+@[inline] def skip1 (expected : List String := [])  : m PUnit := do
+  checkNotEOI expected; skip
 
 /-- Returns the next character in the input. Throws on end-of-input.  -/
-@[inline] def anyChar : m Char := do
-  checkNotEOI; next
+@[inline] def anyChar (expected : List String := []) : m Char := do
+  checkNotEOI expected; next
 
 end
 
@@ -144,6 +144,10 @@ and the error is re-thrown. -/
 def atomic [MonadExcept ε m] (p : m α) : m α :=
   checkpoint fun restore => try p catch e => restore *> throw e
 
+/-- Apply `p` and backtrack unless it errors. -/
+@[inline] def lookahead (p : m α) : m PUnit :=
+  checkpoint fun restore => p *> restore
+
 variable [MonadOrElse m]
 
 /--
@@ -164,6 +168,14 @@ On failure, the parser state is reset back to before `p`. -/
 @[inline] def attemptOrElse (p1 p2 : m α) : m α :=
   checkpoint fun restore => p1 <|> restore *> p2
 
+/-- Apply `p`, backtrack, and return whether `p` succeeded. -/
+@[inline] def isFollowedBy (p : m α) : m Bool :=
+  checkpoint fun restore => p *> restore *> pure true <|> restore *> pure false
+
+/-- Error with `msg` if `isFollowedBy p`. -/
+@[inline] def notFollowedBy [ThrowUnexpected m] (p : m α) (msg : String) : m PUnit := do
+  if (← isFollowedBy p) then throwUnexpected msg
+
 end
 
 --------------------------------------------------------------------------------
@@ -183,14 +195,14 @@ variable [MonadOrElse m]
 
 variable [MonadCheckpoint m]
 
-@[inline] partial def manyCore (p : m α) (acc : Array α) : m (Array α) := do
-  if let some a ← attempt? p then manyCore p (acc.push a) else pure acc
+@[inline] partial def collectManyCore (p : m α) (acc : Array α) : m (Array α) := do
+  if let some a ← attempt? p then collectManyCore p (acc.push a) else pure acc
 
-@[inline] def many (p : m α) : m (Array α) :=
-  manyCore p #[]
+@[inline] def collectMany (p : m α) : m (Array α) :=
+  collectManyCore p #[]
 
-@[always_inline, inline] def many1 (p : m α) : m (Array α) := do
-  let a ← p; manyCore p #[a]
+@[always_inline, inline] def collectMany1 (p : m α) : m (Array α) := do
+  let a ← p; collectManyCore p #[a]
 
 @[inline] partial def skipMany (p : m α) : m PUnit := do
   if (← attempt p) then skipMany p else pure ()
@@ -207,8 +219,8 @@ end
 section
 variable [Monad m] [MonadInput m] [ThrowUnexpected m]
 
-@[inline]
-def skipString (str : String) : m PUnit := do
+/-- Skip over a substring `str` in the input. -/
+@[inline] def skipString (str : String) : m PUnit := do
   let input ← getInput
   let substr := Substring.mk input (← getInputPos) input.endPos |>.take str.length
   if substr == str.toSubstring then
@@ -216,13 +228,17 @@ def skipString (str : String) : m PUnit := do
   else
     throwUnexpected s!"unexpected '{substr}'" [s!"'{str}'"]
 
-@[always_inline, inline]
-def satisfy (p : Char → Bool) (expected : List String := []) : m Char := do
+/-- Take the head character if its satisfies `p`. Otherwise, throw an error. -/
+@[always_inline, inline] def satisfy (p : Char → Bool) (expected : List String := []) : m Char := do
   let c ← anyChar; if p c then return c else throwUnexpected s!"unexpected '{c}'" expected
 
-@[always_inline, inline]
-def skipSatisfy (p : Char → Bool) (expected : List String) : m PUnit :=
+/-- Consume the head character if its satisfies `p`. Otherwise, throw an error. -/
+@[always_inline, inline] def skipSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit :=
   discard <| satisfy p expected
+
+/-- Consume the head character if its satisfies `p`. Otherwise, do nothing. -/
+@[always_inline, inline] def skipIfSatisfy (p : Char → Bool) : m PUnit := do
+  if p (← peek) then skip
 
 /-- Consume characters until one matches `p`. Consumes the matched character. -/
 @[inline] partial def skipTillSatisfy (p : Char → Bool) : m PUnit := do
@@ -277,7 +293,7 @@ and throw it, restoring the state of the last erroring longest match parser.
   let rec @[specialize] loop (prev : EStateM.Result ε σ α) (prevTail) (i) :=
     if _ : i < ps.size then
       checkpoint fun restore => do
-      match (← catchExcept ps[i]) with
+      match (← observing ps[i]) with
       | .ok a =>
         let newTail := (← getInputPos).byteIdx
         if prevTail ≤ newTail then
@@ -303,7 +319,7 @@ and throw it, restoring the state of the last erroring longest match parser.
       | .ok a s => restoreState s *> pure a
       | .error e s => restoreState s *> throw e
   checkpoint fun restore => do
-  let x ← catchExcept ps[0]
+  let x ← observing ps[0]
   let tail := (← getInputPos).byteIdx
   let s ← saveState; restore
   match x with

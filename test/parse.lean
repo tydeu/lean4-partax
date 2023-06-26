@@ -15,5 +15,9 @@ Verify that simple parsers work properly.
 #match_stx strLit LParse.strLit | "hello"
 #match_stx ident LParse.ident | foo.bar
 
+def leftArrow := LParse.unicodeSymbol "← " "<- "
+#match_stx Term.leftArrow leftArrow | ←
+#match_stx Term.leftArrow leftArrow | <-
+
 /- Test that we error if input remains. -/
 #eval flipExcept <| LParse.numLit.run "32 45"

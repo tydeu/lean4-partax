@@ -18,6 +18,9 @@ namespace Partax
 
 export Lean.Parser (InputContext Error)
 
+abbrev FieldIdx := TSyntax fieldIdxKind
+abbrev TAtom (val : String) := TSyntax (Name.mkSimple val)
+
 structure LParseContext extends InputContext where
   prec : Nat
   savedPos? : Option String.Pos := none
@@ -67,10 +70,14 @@ nonrec def run (p : LParse α)
     let pos := ctx.fileMap.toPosition s.pos
     .error <| mkErrorStringWithPos ctx.fileName pos (toString e)
 
+/--
+A do-nothing parser for aliasing.
+It is specialized to `LParse` for better type inference.
+-/
+@[always_inline, inline] def nop : LParse PUnit := pure ()
+
 @[inline] def fail (errMsg : String := "parse failure") : LParse α := do
   throw {unexpected := errMsg}
-
-@[always_inline, inline] def nop : LParse PUnit := pure ()
 
 @[noinline] def unexpectedPrecMessage : String :=
   "unexpected token at this precedence level; consider parenthesizing the term"
@@ -90,14 +97,33 @@ nonrec def run (p : LParse α)
 @[inline] def setLhsPrec (prec : Nat) : LParse PUnit := do
   modify ({· with lhsPrec := prec})
 
+@[inline] def getWsBefore : LParse Substring := (·.prevWs) <$> get
+
+@[inline] def checkWsBefore (errorMsg : String := "space before") : LParse PUnit := do
+  if (← getWsBefore).isEmpty then fail errorMsg
+
+@[inline] def checkNoWsBefore (errorMsg : String := "no space before") : LParse PUnit := do
+  unless (← getWsBefore).isEmpty do fail errorMsg
+
+@[inline] def checkLinebreakBefore (errorMsg : String := "line break") : LParse PUnit := do
+  unless (← getWsBefore).contains '\n' do fail errorMsg
+
 @[inline] def withSavedPos (savedPos? : Option String.Pos) (p : LParse α) : LParse α := do
   withReader ({· with savedPos?}) p
 
 @[inline] def withPosition (p : LParse α) : LParse α := do
   withSavedPos (← getInputPos) p
 
+@[inline] def withPositionAfterLinebreak (p : LParse α) : LParse α  := do
+  if (← getWsBefore).contains '\n' then withPosition p else p
+
 @[inline] def withoutPosition (p : LParse α) : LParse α := do
   withSavedPos none p
+
+@[inline] def errorAtSavedPos (msg : String) (delta : Bool) : LParse PUnit := do
+  if let some pos := (← read).savedPos? then
+    setInputPos <| if delta then (← getInput).next pos else pos
+    throwUnexpected msg
 
 @[inline] def compareToSavedPos (f : Position → Position → Bool) (errorMsg : String) : LParse PUnit := do
   let ctx ← read
@@ -115,16 +141,8 @@ nonrec def run (p : LParse α)
 @[inline] def checkColEq (errorMsg : String := "checkColEq") : LParse PUnit := do
   compareToSavedPos (·.column = ·.column) errorMsg
 
-@[inline] def getWsBefore : LParse Substring := (·.prevWs) <$> get
-
-@[inline] def checkWsBefore (errorMsg : String := "space before") : LParse PUnit := do
-  if (← getWsBefore).isEmpty then fail errorMsg
-
-@[inline] def checkNoWsBefore (errorMsg : String := "no space before") : LParse PUnit := do
-  unless (← getWsBefore).isEmpty do fail errorMsg
-
-@[inline] def checkLinebreakBefore (errorMsg : String := "line break") : LParse PUnit := do
-  unless (← getWsBefore).contains '\n' do fail errorMsg
+@[inline] def checkLineEq (errorMsg : String := "checkLineEq") : LParse PUnit := do
+  compareToSavedPos (·.line = ·.line) errorMsg
 
 --------------------------------------------------------------------------------
 -- # Syntax-specific Parsers
@@ -150,25 +168,20 @@ def withSourceInfo (p : LParse α) : LParse (SourceInfo × α) := do
   let info := .original leading start trailing stop
   return (info, a)
 
-def stdId : LParse String := do
-  extract do
-    skipSatisfy isIdFirst ["identifier start"]
-    skipMany1 <| skipSatisfy isIdRest ["identifier part"]
-
-def atomicId : LParse String := do
+def atomicIdent : LParse String := do
   if (← attempt <| satisfy isIdBeginEscape) then
     extract do skipTillSatisfy isIdEndEscape
   else
     let id ← extract do
-      skipSatisfy isIdFirst ["identifier start"]
-      skipMany1 <| skipSatisfy isIdRest ["identifier part"]
+      skipSatisfy isIdFirst ["ident"]
+      skipMany <| skipSatisfy isIdRest
     if id = "_" then throwUnexpected "hole" ["ident"]
     return id
 
 def name : LParse Name := do
   let mut n := Name.anonymous
   repeat
-    let s ← atomicId
+    let s ← atomicIdent
     n := Name.str n s
   until !(← attempt <| skipChar '.')
   return n
@@ -181,16 +194,29 @@ def atomOf (p : LParse PUnit) : LParse Syntax := do
   let (info, val) ← atomic <| withSourceInfo <| extract p
   return .atom info val
 
-abbrev TAtom (val : String) := TSyntax (Name.str .anonymous val)
-
 def atom (val : String) : LParse (TAtom val) :=
   (⟨·⟩) <$> atomOf (skipString val)
 
-@[inline] def symbol (sym : String) : LParse (TAtom sym) :=
-  atom sym
+def rawCh (c : Char) (trailingWs := false) : LParse (TAtom c.toString) := do
+  let input ← getInput
+  let start ← getInputPos
+  let leading : Substring :=
+    {str := input, startPos := (← getWsBefore).stopPos, stopPos := start}
+  skipChar c
+  let stop ← getInputPos
+  let trailing := if trailingWs then (← consumeWs) else
+    {str := input, startPos := stop, stopPos := stop}
+  let info := .original leading start trailing stop
+  return ⟨.atom info c.toString⟩
 
-@[inline] def nonReservedSymbol (sym : String) (_includeIdent := false) : LParse (TAtom sym) :=
-  atom sym
+@[inline] def symbol (sym : String) : LParse (TAtom sym.trim) :=
+  atom sym.trim
+
+@[inline] def nonReservedSymbol (sym : String) (_includeIdent := false) : LParse (TAtom sym.trim) :=
+  atom sym.trim
+
+def unicodeSymbol (sym asciiSym : String) : LParse Syntax :=
+  atomOf (skipString sym.trim <|> skipString asciiSym.trim)
 
 def node (kind : SyntaxNodeKind) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
   return ⟨.node SourceInfo.none kind (← p)⟩
@@ -207,18 +233,10 @@ def group (p : LParse (Array Syntax)) : LParse Syntax :=
 def hole : LParse (TSyntax `Lean.Parser.Term.hole) :=
   node `Lean.Parser.Term.hole <| atom "_"
 
-def numLit : LParse NumLit :=
-  node numLitKind <| Array.singleton <$> atomOf do
-    let c ← digit
-    if c = '0' then
-      let b ← anyChar
-      match b with
-      | 'b' => skipMany1 hexDigit
-      | 'o' => skipMany1 octDigit
-      | 'x' => skipMany1 bit
-      | _ => skipMany digit
-    else
-      skipMany digit
+def fieldIdx : LParse FieldIdx :=
+  node fieldIdxKind <| Array.singleton <$> atomOf do
+    skipSatisfy fun c => '1' ≤ c ∧ c ≤ '9'
+    skipMany digit
 
 def strLit : LParse StrLit :=
   node strLitKind <| Array.singleton <$> atomOf do
@@ -229,14 +247,55 @@ def strLit : LParse StrLit :=
       | '"' => break
       | _ => continue
 
+def charLit : LParse CharLit :=
+  node charLitKind <| Array.singleton <$> atomOf do
+    skipChar '\''
+    if (← anyChar) = '\\' then
+      skipSatisfy Parser.isQuotableCharDefault
+    skipChar '\''
+
+def numLit : LParse NumLit :=
+  node numLitKind <| Array.singleton <$> atomOf do
+    let c ← digit
+    if c = '0' then
+      let b ← peek
+      match b with
+      | 'b' => skipMany1 hexDigit
+      | 'o' => skipMany1 octDigit
+      | 'x' => skipMany1 bit
+      | _ => skipMany1 digit
+    else
+      skipMany digit
+
+def scientificLit : LParse ScientificLit :=
+  node scientificLitKind <| Array.singleton <$> atomOf do
+    skipMany1 digit
+    let expected := ["'.'", "'e'", "'E'"]
+    let c ← anyChar expected
+    if c == '.' then
+      skipMany1 digit
+    else if c == 'e' || c == 'E' then
+      skipIfSatisfy fun c => c == '-' || c == '+'
+      skipMany1 digit
+    else
+      throwUnexpected s!"unexpected '{c}'" expected
+
+def nameLit : LParse NameLit :=
+  node nameLitKind <| Array.singleton <$> atomOf do
+    skipChar '`'; discard name
+
 def optional (p : LParse (Array Syntax)) : LParse Syntax :=
   attemptD mkNullNode <| @mkNullNode <$> p
 
-def manySyntax (p : LParse Syntax) : LParse Syntax :=
-  @mkNullNode <$> many p
+def many (p : LParse Syntax) : LParse Syntax :=
+  @mkNullNode <$> collectMany p
 
-def many1Syntax (p : LParse Syntax) : LParse Syntax :=
-  @mkNullNode <$> many1 p
+def many1 (p : LParse Syntax) : LParse Syntax :=
+  @mkNullNode <$> collectMany1 p
+
+def many1Unbox (p : LParse Syntax) : LParse Syntax :=
+  collectMany1 p <&> fun xs =>
+    if _ : xs.size = 1 then xs[0]'(by simp [*]) else mkNullNode xs
 
 def sepByTrailing (initArgs : Array Syntax)
 (p : LParse Syntax) (sep : LParse Syntax) : LParse Syntax := do
@@ -261,38 +320,45 @@ def sepBy1NoTrailing (initArgs : Array Syntax)
       break
   return mkNullNode args
 
-def sepBy (p : LParse Syntax) (sep : LParse Syntax) (allowTrailingSep : Bool) : LParse Syntax := do
+def sepBy (p : LParse Syntax)
+(sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep : Bool) : LParse Syntax := do
   if allowTrailingSep then
-    sepByTrailing #[] p sep
+    sepByTrailing #[] p psep
   else if let some a ← attempt? p then
-    if let some s ← attempt? sep then
-      sepBy1NoTrailing #[a, s] p sep
+    if let some s ← attempt? psep then
+      sepBy1NoTrailing #[a, s] p psep
     else
       return mkNullNode #[a]
   else
     return mkNullNode
 
-def sepBy1 (p : LParse Syntax) (sep : LParse Syntax) (allowTrailingSep : Bool) : LParse Syntax := do
+def sepBy1 (p : LParse Syntax)
+(sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep : Bool) : LParse Syntax := do
   let a ← p
-  if let some s ← attempt? sep then
+  if let some s ← attempt? psep then
     if allowTrailingSep then
-      sepByTrailing #[a, s] p sep
+      sepByTrailing #[a, s] p psep
     else
       return mkNullNode #[a]
   else
-    sepBy1NoTrailing #[] p sep
+    sepBy1NoTrailing #[] p psep
 
-@[inline] def sepByIndent (p : LParse Syntax) (sep : LParse Syntax) (allowTrailingSep := false) : LParse Syntax :=
-  withPosition <| sepBy (checkColGe *> p) (sep <|> checkColEq *> checkLinebreakBefore *> pure mkNullNode) allowTrailingSep
+@[inline] def pushNone : LParse Syntax :=
+  pure mkNullNode
 
-@[inline] def sepBy1Indent (p : LParse Syntax) (sep : LParse Syntax) (allowTrailingSep := false) : LParse Syntax :=
-  withPosition <| sepBy1 (checkColGe *> p) (sep <|> checkColEq *> checkLinebreakBefore *> pure mkNullNode) allowTrailingSep
+@[inline] def sepByIndent (p : LParse Syntax)
+(sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep := false) : LParse Syntax :=
+  withPosition <| sepBy (checkColGe *> p) sep (psep <|> checkColEq *> checkLinebreakBefore *> pushNone) allowTrailingSep
+
+@[inline] def sepBy1Indent (p : LParse Syntax)
+(sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep := false) : LParse Syntax :=
+  withPosition <| sepBy1 (checkColGe *> p) sep (psep <|> checkColEq *> checkLinebreakBefore *> pushNone) allowTrailingSep
 
 def sepByIndentSemicolon (p : LParse Syntax) : LParse Syntax :=
-  sepByIndent p (atom ";") (allowTrailingSep := true)
+  sepByIndent p ";" (allowTrailingSep := true)
 
 def sepBy1IndentSemicolon (p : LParse Syntax) : LParse Syntax :=
-  sepBy1Indent p (atom ";") (allowTrailingSep := true)
+  sepBy1Indent p ";" (allowTrailingSep := true)
 
 @[inline] partial def trailingLoop (head : Syntax)
 (trailing : Array (LParse Syntax)) (h : trailing.size > 0) : LParse Syntax :=
@@ -301,7 +367,7 @@ where
   step head := do
     let iniPos ← getInputPos
     checkpoint fun restore => do
-    match (← catchExcept <| longestMatch trailing h Parser.Error.merge) with
+    match (← observing <| longestMatch trailing h Parser.Error.merge) with
     | .ok tail =>
       let node := (.node .none tail.getKind <| #[head] ++ tail.getArgs)
       -- break the loop if a successful trailing parser does not consume anything
@@ -332,6 +398,12 @@ class LParseOrElse (α : Type) (β : Type) (γ : outParam Type) where
   orElse : LParse α → LParse β → LParse γ
 
 instance : LParseOrElse Syntax Syntax Syntax where
+  orElse p1 p2 := p1 <|> p2
+
+instance : LParseOrElse (TSyntax k) Syntax Syntax where
+  orElse p1 p2 := p1 <|> p2
+
+instance : LParseOrElse Syntax (TSyntax k) Syntax where
   orElse p1 p2 := p1 <|> p2
 
 instance : LParseOrElse (TSyntax k1) (TSyntax k2) (TSyntax (k1 ++ k2)) where

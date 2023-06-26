@@ -89,9 +89,9 @@ compile_parser exSepDigit
 /-
 Demonstration of compiling builtin Lean syntax
 -/
-#print explicitBinders
-compile_parser explicitBinders
-#match_stx explicitBinders explicitBinders.lParse | (foo.bar : Nat) (_ : String)
+#print Tactic.caseArg
+compile_parser Tactic.caseArg
+#match_stx Tactic.caseArg Tactic.caseArg.lParse | foo.bar _
 
 /-
 Example of compiling a category
@@ -106,16 +106,23 @@ compile_parser exCatP
 /-
 Demonstration of compiling small builtin Lean categories
 -/
-
-namespace exStx
+namespace nestedCats
 compile_parser_category stx
 #match_stx stx stx | ("compile_parser " ident (" as " ident)?)
-end exStx
 
-namespace exPP
+compile_parser_category attr
+#match_stx attr attr | custom (high + default)
+--#match_stx attr attr | instance (high + default)  -- TODO: ident clash
+end nestedCats
+
+namespace singleCats
 compile_parser_category prio
 #match_stx prio prio | default + default
 
 compile_parser_category prec
 #match_stx prec prec | max - 10
-end exPP
+
+compile_parser_category level
+#match_stx level level | imax (u+1) _ v
+--#match_stx level level | max (u+1) v -- TODO: ident clash
+end singleCats

@@ -7,15 +7,10 @@ import Partax.Test
 
 open Partax Test Lean Parser
 
-set_option trace.Partax.compile true
+set_option trace.Partax.compile.result true
 
 /-! # Large Compile Tests
 Examples of compiling large Lean categories.
 -/
 
-compile_parser_category conv
-#match_stx conv conv |
-  first
-  | done
-    done
-  | {done}
+compile_parser_category (dry) command

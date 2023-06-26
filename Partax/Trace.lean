@@ -11,3 +11,5 @@ namespace Partax
 
 initialize
   registerTraceClass `Partax.compile
+  registerTraceClass `Partax.compile.step true
+  registerTraceClass `Partax.compile.result true
