@@ -36,7 +36,7 @@ def stripUpperPrefix : Name → Name
 @[implemented_by Lean.Meta.evalExpr]
 opaque evalExpr (α) (type : Expr) (value : Expr) (safety := DefinitionSafety.safe) : MetaM α
 
-@[inline] def getParserAlias? (aliasName : Name) : IO (Option Name) := do
+@[inline] def getParserAlias? (aliasName : Name) : BaseIO (Option Name) := do
   return (← Parser.parserAliases2infoRef.get).find? aliasName |>.map (·.declName)
 
 /-
@@ -105,33 +105,11 @@ def decimal : LParse Syntax := atomOf do
 @[inline] def dummy : LParse Syntax := do
   fail "dummy parser"
 
-@[inline] def dummy1 (_ : α) : LParse Syntax := do
-  fail "dummy parser"
-
 end LParse
 
-def aliases :=
+def syntaxAliases :=
   ({} : NameMap Name)
-  |>.insert `atomic ``atomic
-  |>.insert `lookahead ``lookahead
-  |>.insert `notFollowedBy ``notFollowedBy
-  |>.insert `optional ``LParse.optional
-  |>.insert `group ``LParse.group
-  |>.insert `many ``LParse.many
-  |>.insert `many1 ``LParse.many1
-  |>.insert `sepByIndentSemicolon ``LParse.sepByIndentSemicolon
-  |>.insert `sepBy1IndentSemicolon ``LParse.sepBy1IndentSemicolon
-  |>.insert `withPosition ``LParse.withPosition
-  |>.insert `withoutPosition ``LParse.withoutPosition
-  |>.insert `ppIndent ``id
-  |>.insert `ppDedent ``id
-  |>.insert `ppRealFill ``id
-  |>.insert `ppRealGroup ``id
-  |>.insert `ppGroup ``id
-  |>.insert `patternIgnore ``id
-  -- Placeholders
   |>.insert `decimal ``LParse.decimal
-  |>.insert `interpolatedStr ``LParse.dummy1
 
 def parserAliases :=
   ({} : NameMap Name)
@@ -206,7 +184,9 @@ def parserAppHandlers :=
   |>.insert ``withOpenDecl compileArg0
   |>.insert ``withForbidden compileArg1
   |>.insert ``withoutForbidden compileArg0
+  |>.insert ``Parser.andthen compileParserAndThen
   |>.insert ``HAndThen.hAndThen compileAndThen
+  |>.insert ``Parser.orelse compileParserOrElse
   |>.insert ``HOrElse.hOrElse compileOrElse
   |>.insert ``parserOfStack mkDummy
   |>.insert ``interpolatedStr mkDummy
@@ -222,9 +202,17 @@ where
     let p1 ← compileExpr args[4]!
     let p2 ← compileExpr args[5]!.bindingBody!
     return (← `($p1 >> $p2))
+  compileParserAndThen compileExpr args := do
+    let p1 ← compileExpr args[0]!
+    let p2 ← compileExpr args[1]!
+    return (← `($p1 >> $p2))
   compileOrElse compileExpr args := do
     let p1 ← compileExpr args[4]!
     let p2 ← compileExpr args[5]!.bindingBody!
+    return (← `($p1 <|> $p2))
+  compileParserOrElse compileExpr args := do
+    let p1 ← compileExpr args[0]!
+    let p2 ← compileExpr args[1]!
     return (← `($p1 <|> $p2))
 
 --------------------------------------------------------------------------------
@@ -237,7 +225,7 @@ open Meta Elab Term Command Syntax Parser
 @[inline] def compileCatUse
 (compileCat : Name → CompileM PUnit)
 (catName : Name) (rbp : Term) : CompileM Term := do
-  if let some alias := aliases.find? catName then
+  if let some alias := syntaxAliases.find? catName then
     return mkCIdentFrom (← getRef) alias
   else
     compileCat catName
@@ -305,7 +293,7 @@ where
               | throwError "cannot compile opaque definition '{info.name}'"
             let value := pLam.beta args
             if value.isAppOf ``Parser.mk || value.isAppOf ``Parser.withFn then
-              throwError "cannot compile primitive parser '{fname}'"
+              throwError "cannot compile parameterized primitive parser '{fname}'"
             compileExpr value
           else
             throwError "cannot compile parameterized parser {fname}"
@@ -329,36 +317,66 @@ where
       | _ =>
         return none
 
-def compileParserDescr
-(compileCat : Name → CompileM PUnit) (descr : ParserDescr) : CompileM Term :=
+def compileParserDescrToExpr (descr : ParserDescr) : IO Expr :=
   compileDescr descr
 where
   compileAlias name args := do
-    if let some name := aliases.find? name then
-      return mkApp (mkCIdentFrom (← getRef) name) args
+    if let some name := syntaxAliases.find? name then
+      return mkAppN (mkConst name) args
     else if let some name ← getParserAlias? name then
-      if args.size > 0 then
-        -- TODO: Support parameterized parsers here (needs Descr -> Expr)
-        throwError "cannot compile parameterized parser alias '{name}'"
-      else
-        compileParserExpr compileCat (mkConst name)
+      return mkAppN (mkConst name) args
     else
-      throwError s!"no parser alias defined for alias `{name}`"
+      throw <| IO.userError s!"no syntax or parser defined for alias `{name}`"
   compileDescr
   | .const name => do
     compileAlias name #[]
   | .unary name p => do
-    let p ← compileDescr p
+    compileAlias name #[← compileDescr p]
+  | .binary name p1 p2 => do
+    compileAlias name #[← compileDescr p1, ← compileDescr p2]
+  | .node kind prec p => do
+    return mkAppN (mkConst ``leadingNode)
+      #[toExpr kind, toExpr prec, ← compileDescr p]
+  | .trailingNode kind prec lhsPrec p => do
+    return mkAppN (mkConst ``trailingNode)
+      #[toExpr kind, toExpr prec, toExpr lhsPrec, ← compileDescr p]
+  | .symbol val => do
+    return .app (mkConst ``symbol) (toExpr val)
+  | .nonReservedSymbol val includeIdent => do
+    return mkAppN (mkConst ``nonReservedSymbol) #[toExpr val, toExpr includeIdent]
+  | .cat catName rbp => do
+    return mkAppN (mkConst ``categoryParser) #[toExpr catName, toExpr rbp]
+  | .parser name => do
+    return mkConst name
+  | .nodeWithAntiquot _name kind p => do -- No antiquote support
+    return mkAppN (mkConst ``Parser.node) #[toExpr kind, ← compileDescr p]
+  | .sepBy p sep psep allowTrailingSep => do
+    return mkAppN (mkConst ``sepBy)
+      #[← compileDescr p, toExpr sep, ← compileDescr psep, toExpr allowTrailingSep]
+  | .sepBy1 p sep psep allowTrailingSep => do
+    return mkAppN (mkConst ``sepBy1)
+      #[← compileDescr p, toExpr sep, ← compileDescr psep, toExpr allowTrailingSep]
+
+partial def compileParserDescr
+(compileCat : Name → CompileM PUnit) (descr : ParserDescr) : CompileM Term :=
+  compileDescr descr
+where
+  compileAlias name args := do
+    if let some name := syntaxAliases.find? name then
+      let args ← args.mapM compileDescr
+      return mkApp (mkCIdentFrom (← getRef) name) args
+    else if let some name ← getParserAlias? name then
+      let args ← liftM <| args.mapM compileParserDescrToExpr
+      compileParserExpr compileCat <| mkAppN (mkConst name) args
+    else
+      throwError s!"no syntax or parser defined for alias `{name}`"
+  compileDescr
+  | .const name => do
+    compileAlias name #[]
+  | .unary name p => do
     compileAlias name #[p]
   | .binary name p1 p2 => do
-    let p1 ← compileDescr p1
-    let p2 ← compileDescr p2
-    if name = `andthen then
-      `($p1 >> $p2)
-    else if name = `orelse then
-      `($p1 <|> $p2)
-    else
-      compileAlias name #[p1, p2]
+    compileAlias name #[p1, p2]
   | .node kind prec p => do
     let p ← compileDescr p
     ``(LParse.leadingNode $(quote kind) $(quote prec) $p)
@@ -439,7 +457,7 @@ partial def compileParserCat
     modify fun s => {s with compiled := s.compiled.insert pName}
     let pId := mkIdentFrom ref pName
     let name ← resolveGlobalConstNoOverload (mkIdentFrom ref k)
-    if let some alias := aliases.find? name then
+    if let some alias := syntaxAliases.find? name then
       leadingPs := leadingPs.push pId
       pushAliasDef pName alias
     else
