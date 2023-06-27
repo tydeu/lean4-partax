@@ -131,6 +131,7 @@ def parserAliases :=
   |>.insert ``Parser.leadingNode ``LParse.leadingNode
   |>.insert ``Parser.trailingNode ``LParse.trailingNode
   |>.insert ``Parser.pushNone ``LParse.pushNone
+  |>.insert ``Parser.group ``LParse.group
   -- Combinators
   |>.insert ``Parser.atomic ``atomic
   |>.insert ``Parser.lookahead ``lookahead
@@ -242,9 +243,9 @@ where
         return mkCIdentFrom (← getRef) alias
       let pName := (← read) ++ stripUpperPrefix name
       let some info := (← getEnv).find? name
-        | throwError s!"unknown constant '{name}'"
+        | return mkIdentFrom (← getRef) name -- potential local constant
       let some numArgs ← checkParserType info
-        | return mkCIdentFrom (← getRef) name
+        | return mkIdentFrom (← getRef) name
       withTraceNode `Partax.compile.step (fun _ => return mkConst name) do
       if (← checkOrMarkVisited pName) then
         return mkIdentFrom (← getRef) pName
@@ -290,13 +291,13 @@ where
           withStepTrace fname do
           if numArgs = args.size then
             let some pLam := info.value?
-              | throwError "cannot compile opaque definition '{info.name}'"
+              | throwError "cannot compile opaque definition '{fname}'"
             let value := pLam.beta args
             if value.isAppOf ``Parser.mk || value.isAppOf ``Parser.withFn then
               throwError "cannot compile parameterized primitive parser '{fname}'"
             compileExpr value
           else
-            throwError "cannot compile parameterized parser {fname}"
+            throwError "cannot compile partial application of parameterized parser '{fname}'"
         else
           return mkApp (← compileExpr fn) (← args.mapM compileExpr)
     | .letE _declName _type value body _nonDep =>
@@ -317,7 +318,8 @@ where
       | _ =>
         return none
 
-def compileParserDescrToExpr (descr : ParserDescr) : IO Expr :=
+def compileParserDescrToExpr
+(compileCat : Name → CompileM PUnit) (descr : ParserDescr) : CompileM Expr :=
   compileDescr descr
 where
   compileAlias name args := do
@@ -326,7 +328,7 @@ where
     else if let some name ← getParserAlias? name then
       return mkAppN (mkConst name) args
     else
-      throw <| IO.userError s!"no syntax or parser defined for alias `{name}`"
+      throwError s!"no syntax or parser defined for alias `{name}`"
   compileDescr
   | .const name => do
     compileAlias name #[]
@@ -349,7 +351,12 @@ where
   | .parser name => do
     return mkConst name
   | .nodeWithAntiquot _name kind p => do -- No antiquote support
-    return mkAppN (mkConst ``Parser.node) #[toExpr kind, ← compileDescr p]
+    let declName := (← read) ++ stripUpperPrefix kind
+    unless (← checkOrMarkVisited declName) do
+      let x := mkAppN (mkConst ``Parser.node) #[toExpr kind, ← compileDescr p]
+      let p ← compileParserExpr compileCat x
+      pushDef declName p
+    return mkConst declName
   | .sepBy p sep psep allowTrailingSep => do
     return mkAppN (mkConst ``sepBy)
       #[← compileDescr p, toExpr sep, ← compileDescr psep, toExpr allowTrailingSep]
@@ -357,56 +364,9 @@ where
     return mkAppN (mkConst ``sepBy1)
       #[← compileDescr p, toExpr sep, ← compileDescr psep, toExpr allowTrailingSep]
 
-partial def compileParserDescr
-(compileCat : Name → CompileM PUnit) (descr : ParserDescr) : CompileM Term :=
-  compileDescr descr
-where
-  compileAlias name args := do
-    if let some name := syntaxAliases.find? name then
-      let args ← args.mapM compileDescr
-      return mkApp (mkCIdentFrom (← getRef) name) args
-    else if let some name ← getParserAlias? name then
-      let args ← liftM <| args.mapM compileParserDescrToExpr
-      compileParserExpr compileCat <| mkAppN (mkConst name) args
-    else
-      throwError s!"no syntax or parser defined for alias `{name}`"
-  compileDescr
-  | .const name => do
-    compileAlias name #[]
-  | .unary name p => do
-    compileAlias name #[p]
-  | .binary name p1 p2 => do
-    compileAlias name #[p1, p2]
-  | .node kind prec p => do
-    let p ← compileDescr p
-    ``(LParse.leadingNode $(quote kind) $(quote prec) $p)
-  | .trailingNode kind prec lhsPrec p => do
-    let p ← compileDescr p
-    ``(LParse.trailingNode $(quote kind) $(quote prec) $(quote lhsPrec) $p)
-  | .symbol val => do
-    ``(LParse.symbol $(quote val))
-  | .nonReservedSymbol val includeIdent => do
-    ``(LParse.nonReservedSymbol $(quote val) $(quote includeIdent))
-  | .cat catName rbp => do
-    compileCatUse compileCat catName (quote rbp)
-  | .parser name => do
-    compileParserExpr compileCat (mkConst name)
-  | .nodeWithAntiquot _name kind p => do -- No antiquote support
-    let nName := (← read) ++ stripUpperPrefix kind
-    if (← checkOrMarkVisited nName) then
-      return mkIdentFrom (← getRef) nName
-    let p ← compileDescr p
-    let value ← ``(LParse.node $(quote kind) $p)
-    pushDef nName value
-    return mkIdentFrom (← getRef) nName
-  | .sepBy p sep psep allowTrailingSep => do
-    let p ← compileDescr p
-    let psep ← compileDescr psep
-    ``(LParse.sepBy $p $(quote sep) $psep $(quote allowTrailingSep))
-  | .sepBy1 p sep psep allowTrailingSep => do
-    let p ← compileDescr p
-    let psep ← compileDescr psep
-    ``(LParse.sepBy1 $p $(quote sep) $psep $(quote allowTrailingSep))
+@[inline] def compileParserDescr
+(compileCat : Name → CompileM PUnit) (descr : ParserDescr) : CompileM Term := do
+  compileParserExpr compileCat <| ← compileParserDescrToExpr compileCat descr
 
 def compileParserInfo
 (compileCat : Name → CompileM PUnit)
