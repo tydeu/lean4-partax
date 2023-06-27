@@ -106,16 +106,8 @@ compile_parser exCatP
 /-
 Demonstration of compiling small builtin Lean categories
 -/
-namespace nestedCats
-compile_parser_category stx
-#match_stx stx stx | ("compile_parser " ident (" as " ident)?)
+namespace ex
 
-compile_parser_category attr
-#match_stx attr attr | custom (high + default)
---#match_stx attr attr | instance (high + default)  -- TODO: ident clash
-end nestedCats
-
-namespace singleCats
 compile_parser_category prio
 #match_stx prio prio | default + default
 
@@ -125,4 +117,10 @@ compile_parser_category prec
 compile_parser_category level
 #match_stx level level | imax (u+1) _ v
 --#match_stx level level | max (u+1) v -- TODO: ident clash
-end singleCats
+
+compile_parser_category stx
+#match_stx stx stx | ("compile_parser " ident (" as " ident)?)
+
+compile_parser_category attr
+#match_stx attr attr | custom (high + default)
+--#match_stx attr attr | instance (high + default)  -- TODO: ident clash

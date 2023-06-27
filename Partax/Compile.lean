@@ -403,13 +403,15 @@ def compileParserConst
 -- Requires `mutual partial` definitions of parsers
 partial def compileParserCat
 (catName : Name) : CompileM PUnit := do
-  let ref ← getRef
+  unless (← resolveGlobalName catName).filter (·.2.isEmpty) |>.isEmpty do
+    return -- Use an existing definition if one exists
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
   let some cat := cats.find? catName
     | throwError "cannot compile unknown category `{catName}`"
   withStepTrace (``Parser.Category ++ catName) (collapsed := true) do
   if (← checkOrMarkVisited catName) then
     return
+  let ref ← getRef
   let mut leadingPs := #[]
   let mut trailingPs := #[]
   for (k, _) in cat.kinds do
