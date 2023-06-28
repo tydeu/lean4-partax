@@ -12,18 +12,25 @@ open Lean
 
 namespace Partax
 
---------------------------------------------------------------------------------
--- # LParse Type for Parsing Syntax
---------------------------------------------------------------------------------
-
 export Lean.Parser (InputContext Error)
 
 abbrev FieldIdx := TSyntax fieldIdxKind
 abbrev TAtom (val : String) := TSyntax (Name.mkSimple val)
 
+--------------------------------------------------------------------------------
+-- # LParse Type for Parsing Syntax
+--------------------------------------------------------------------------------
+
+opaque OpaqueLParse.nonemptyType (α : Type u) : NonemptyType.{0}
+/-- An opaque forward-declared version of `LParse` for wrapping category parsers. -/
+def OpaqueLParse (α : Type α) : Type := OpaqueLParse.nonemptyType α |>.type
+instance : Nonempty (OpaqueLParse α) :=  OpaqueLParse.nonemptyType α |>.property
+
+abbrev CategoryMap := NameMap (OpaqueLParse Syntax)
 structure LParseContext extends InputContext where
-  prec : Nat
+  prec : Nat := 0
   savedPos? : Option String.Pos := none
+  cats : CategoryMap := {}
 
 structure LParseState where
   lhsPrec : Nat := 0
@@ -32,6 +39,16 @@ structure LParseState where
 
 /-- Combinatorial, monadic parser for Lean-style parsing. -/
 abbrev LParse := ReaderT LParseContext <| EStateM Error LParseState
+
+namespace OpaqueLParse
+unsafe def unsafeMk : LParse α → OpaqueLParse α := unsafeCast
+@[implemented_by unsafeMk] opaque mk : LParse α → OpaqueLParse α
+instance : Coe (LParse α) (OpaqueLParse α)  := ⟨mk⟩
+instance : Inhabited (OpaqueLParse α) := ⟨mk default⟩
+unsafe def unsafeGet : OpaqueLParse α → LParse α := unsafeCast
+@[implemented_by unsafeGet] opaque get : OpaqueLParse α → LParse α
+instance : Coe (OpaqueLParse α) (LParse α) := ⟨get⟩
+end OpaqueLParse
 
 namespace LParse
 
@@ -61,9 +78,10 @@ instance : MonadOrElse LParse := ⟨mergeOrElse⟩
   return ws
 
 open Parser in
-nonrec def run (p : LParse α)
-(input : String) (fileName := "<string>") (rbp := 0) : Except String α :=
-  let ctx := {toInputContext := mkInputContext input fileName, prec := rbp}
+nonrec def run (input : String) (p : LParse α)
+(fileName := "<string>") (rbp := 0) (cats : CategoryMap := {}) : Except String α :=
+  let ictx := mkInputContext input fileName
+  let ctx := {toInputContext := ictx, prec := rbp, cats}
   match (consumeWs *> p <* checkEOI).run ctx |>.run {} with
   | .ok a _ => .ok a
   | .error e s =>
@@ -385,6 +403,13 @@ def category (name : Name) (leading trailing : Array (LParse Syntax)) : LParse (
       return ⟨head⟩
   else
     throwUnexpected s!"attempted to parse category '{name}' with no leading parsers"
+
+/-- Parse the category `name` stored within the `LParse` context. -/
+def categoryRef (name : Name) (rbp : Nat := 0) : LParse (TSyntax name) := do
+  if let some op := (← read).cats.find? name then
+    (⟨·⟩) <$> withPrec rbp op.get
+  else
+    throwUnexpected s!"attempted to parse unknown category '{name}'"
 
 end LParse
 

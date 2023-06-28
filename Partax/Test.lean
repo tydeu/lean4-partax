@@ -39,7 +39,13 @@ def matchStxFn (pstx : Syntax) (stx : Syntax) : Except String Syntax := do
   if pstx == stx then return pstx
   throw <| s!"parsed:\n{pstx}\nexpected:\n{stx}\n"
 
-@[macro matchStx] def expandMatchStx : Macro := fun stx => do
-  let some src := stx[4].updateTrailing "".toSubstring |>.reprint
+@[macro matchStx] def expandMatchStx : Macro := fun matchStx => do
+  let p : Ident := ⟨matchStx[2]⟩; let stx := matchStx[4]
+  let some src := stx.updateTrailing "".toSubstring |>.reprint
     | Macro.throwError "cannot reprint syntax"
-  `(#eval $(⟨stx[2]⟩).run $(quote src) |>.bind (matchStxFn · $(quoteSyntax stx[4])))
+  let catsName := p.getId ++ `categories
+  if (← Macro.resolveGlobalName catsName).filter (·.2.isEmpty) |>.isEmpty then
+    `(#eval $(p).run $(quote src) >>= (matchStxFn · $(quoteSyntax stx)))
+  else
+    let cats := mkIdentFrom p catsName
+    `(#eval $(p).run $(quote src) (cats := $cats) >>= (matchStxFn · $(quoteSyntax stx)))

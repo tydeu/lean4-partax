@@ -61,17 +61,25 @@ section
 open Elab.Command (CommandElabM)
 
 structure CompileState where
-  compiled : NameSet := .empty
+  /-- Categories used in compiling the current parser or category. -/
+  cats : NameSet := {}
+  /-- Associates each category with its used categories. -/
+  catMap : NameMap NameSet := {}
+  /-- Array of compiled parser definitions. -/
   defs : Array Command := #[]
+  /-- Set of definitions already compiled. -/
+  compiled : NameSet := {}
 
 abbrev CompileT m := ReaderT Name <| StateT CompileState m
+
 def CompileT.run [Functor m] (x : CompileT m α) : m (Array Command) :=
   StateT.run (ReaderT.run x .anonymous) {} <&> (·.2.defs)
 
-abbrev CompileM := CompileT CommandElabM
+@[inline] def pushCmd [Monad m] (cmd : Command) : CompileT m PUnit :=
+  modify fun s => {s with defs := s.defs.push cmd}
 
-def withStepTrace (name : Name) (k : CompileM α) (collapsed := false) : CompileM α := do
-  inline <| withTraceNode `Partax.compile.step (fun _ => return mkConst name) k collapsed
+@[inline] def addCategory [Monad m] (name : Name) : CompileT m PUnit :=
+  modify fun s => {s with cats := s.cats.insert name}
 
 /-- Ensure `name` is marked and return whether it already was. -/
 @[inline] def checkOrMarkVisited [Monad m] (name : Name) : CompileT m Bool :=
@@ -79,14 +87,29 @@ def withStepTrace (name : Name) (k : CompileM α) (collapsed := false) : Compile
     if s.compiled.contains name then (true, s)
     else (false, {s with compiled := s.compiled.insert name})
 
-@[inline] def pushCmd [Monad m] (cmd : Command) : CompileT m PUnit :=
-  modify fun s => {s with defs := s.defs.push cmd}
+abbrev CompileM := CompileT CommandElabM
+
+def withStepTrace (name : Name) (k : CompileM α) (collapsed := false) : CompileM α := do
+  inline <| withTraceNode `Partax.compile.step (fun _ => return mkConst name) k collapsed
 
 @[inline] def pushDef (name : Name) (value : Term) : CompileM PUnit := do
-  pushCmd <| ← `(partial def $name := $value)
+  pushCmd <| ← `(def $name := $value)
 
 @[inline] def pushAliasDef (name : Name) (alias : Name) : CompileM PUnit := do
-  pushCmd <| ← `(@[inline] partial def $name := $(mkCIdentFrom (← getRef) alias))
+  pushCmd <| ← `(@[inline] def $name := $(mkCIdentFrom (← getRef) alias))
+
+def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
+  let s ← get
+  let cats : NameSet := cats.fold (init := {}) fun ns n =>
+    if let some cats := s.catMap.find? n then ns.union cats else ns.insert n
+  let entries ← cats.foldM (init := #[]) fun a n =>
+    return a.push <| ← ``(($(quote n), $(mkIdent n)))
+  let catMap ← ``((RBMap.ofList [$entries,*] : CategoryMap))
+  pushDef (ns.str "categories") catMap
+
+def pushCategoriesDefs : CompileM PUnit := do
+  let s ← get; s.cats.forM fun cat => do
+    if let some cats := s.catMap.find? cat then pushCategoriesDef cat cats
 
 end
 
@@ -223,15 +246,6 @@ where
 section
 open Meta Elab Term Command Syntax Parser
 
-@[inline] def compileCatUse
-(compileCat : Name → CompileM PUnit)
-(catName : Name) (rbp : Term) : CompileM Term := do
-  if let some alias := syntaxAliases.find? catName then
-    return mkCIdentFrom (← getRef) alias
-  else
-    compileCat catName
-    ``(LParse.withPrec $rbp $catName)
-
 partial def compileParserExpr
 (compileCat : Name → CompileM PUnit) (x : Expr) : CompileM Term :=
   compileExpr x
@@ -276,9 +290,12 @@ where
       else if fname = ``categoryParser then
         let catName ← liftTermElabM <| liftMetaM do
           evalExpr Name (mkConst ``Name) args[0]!
-        let rbp ← compileExpr args[1]!
-        let use ← compileCatUse compileCat catName rbp
-        return use
+        if let some alias := syntaxAliases.find? catName then
+          return mkCIdentFrom (← getRef) alias
+        else
+          compileCat catName
+          let rbp ← compileExpr args[1]!
+          ``(LParse.categoryRef $(quote catName) $rbp)
       else if let some handler := parserAppHandlers.find? fname then
         handler compileExpr args
       else if let some alias := parserAliases.find? fname then
@@ -353,6 +370,7 @@ where
   | .nodeWithAntiquot _name kind p => do -- No antiquote support
     let declName := (← read) ++ stripUpperPrefix kind
     unless (← checkOrMarkVisited declName) do
+      withStepTrace kind do
       let x := mkAppN (mkConst ``Parser.node) #[toExpr kind, ← compileDescr p]
       let p ← compileParserExpr compileCat x
       pushDef declName p
@@ -403,17 +421,19 @@ def compileParserConst
 -- Requires `mutual partial` definitions of parsers
 partial def compileParserCat
 (catName : Name) : CompileM PUnit := do
+  addCategory catName
+  withStepTrace (``Parser.Category ++ catName) (collapsed := true) do
+  if (← checkOrMarkVisited catName) then
+    return
   unless (← resolveGlobalName catName).filter (·.2.isEmpty) |>.isEmpty do
     return -- Use an existing definition if one exists
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
   let some cat := cats.find? catName
     | throwError "cannot compile unknown category `{catName}`"
-  withStepTrace (``Parser.Category ++ catName) (collapsed := true) do
-  if (← checkOrMarkVisited catName) then
-    return
   let ref ← getRef
   let mut leadingPs := #[]
   let mut trailingPs := #[]
+  let currCats ← modifyGet fun s => (s.cats, {s with cats := {}})
   for (k, _) in cat.kinds do
     let pName := catName ++ stripUpperPrefix k
     modify fun s => {s with compiled := s.compiled.insert pName}
@@ -430,8 +450,16 @@ partial def compileParserCat
       else
         leadingPs := leadingPs.push pId
       pushDef pName p
-  let value ← ``(LParse.category $(quote catName) #[$[↑$leadingPs],*] #[$[↑$trailingPs],*])
+  let value ← ``(
+    LParse.category $(quote catName)
+      #[$[($leadingPs : LParse Syntax)],*]
+      #[$[($trailingPs : LParse Syntax)],*]
+  )
   pushDef catName value
+  modify fun s => {s with
+    catMap := s.catMap.insert catName s.cats
+    cats := s.cats.union <| currCats.insert catName
+  }
 
 end
 
@@ -448,9 +476,10 @@ scoped syntax "compile_parser_category " (dry)? ident : command
 elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident) => do
   let defn := Lean.mkConst (``Parser.Category ++ cat.getId)
   discard <| liftTermElabM <| addTermInfo cat defn
-  let defs ← compileParserCat cat.getId |>.run
-  let cmd ← `(mutual $defs* end)
-  trace[Partax.compile.result] s!"\n{(← liftCoreM <| ppCommand cmd).pretty 90}"
+  let defs ← compileParserCat cat.getId *> pushCategoriesDefs |>.run
+  let cmd : Command := ⟨mkNullNode defs⟩ -- ← `(mutual $defs* end)
+  trace[Partax.compile.result] ← defs.foldlM (init := "") fun str cmd =>
+    return str ++ s!"\n{(← liftCoreM <| ppCommand cmd).pretty 90}"
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd
 
 scoped syntax "compile_parser " (dry)? ident (" as " ident)? : command
@@ -463,8 +492,10 @@ elab_rules : command | `(compile_parser $[$dry?]? $id $[as $root?]?) => do
   let defs ← CompileT.run do
     let (_, p) ← compileParserInfo compileParserCat info
     unless (← get).compiled.contains innerRoot do pushDef innerRoot p
-  let cmd ← `(mutual $defs* end)
-  trace[Partax.compile.result] s!"\n{(← liftCoreM <| ppCommand cmd).pretty 90}"
+    pushCategoriesDefs; pushCategoriesDef .anonymous (← get).cats
+  let cmd : Command := ⟨mkNullNode defs⟩ -- ← `(mutual $defs* end)
+  trace[Partax.compile.result] ← defs.foldlM (init := "") fun str cmd =>
+    return str ++ s!"\n{(← liftCoreM <| ppCommand cmd).pretty 90}"
   let ns : Name := root?.getD id |>.getId.str "lParse"
   let outerRoot := root?.getD ns
   let cmd ← `(namespace $ns $cmd end $ns abbrev $outerRoot := $(ns ++ innerRoot))
