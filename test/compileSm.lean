@@ -115,8 +115,8 @@ compile_parser_category prec
 #match_stx prec prec | max - 10
 
 compile_parser_category level
+#match_stx level level | max u
 #match_stx level level | imax (u+1) _ v
---#match_stx level level | max (u+1) v -- TODO: ident clash
 
 compile_parser_category stx
 #match_stx stx stx | ("compile_parser " ident (" as " ident)?)

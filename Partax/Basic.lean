@@ -303,17 +303,17 @@ and throw it, restoring the state of the last erroring longest match parser.
           restore; loop prev prevTail (i+1)
       | .error e2 =>
         let newTail := (← getInputPos).byteIdx
-        match prev with
-        | .ok .. => restore; loop prev newTail (i+1)
-        | .error e1 _ =>
-          match compare prevTail newTail with
-          | .lt =>
+        if prevTail ≤ newTail then
+          match prev with
+          | .ok .. => restore; loop prev prevTail (i+1)
+          | .error e1 _ =>
             let s2 ← saveState; restore
-            loop (.error e2 s2) newTail (i+1)
-          | .eq =>
-            let s2 ← saveState; restore
-            loop (.error (mergeErrors e1 e2) s2) newTail (i+1)
-          | .gt => restore; loop prev prevTail (i+1)
+            if prevTail = newTail then
+              loop (.error (mergeErrors e1 e2) s2) newTail (i+1)
+            else
+              loop (.error e2 s2) newTail (i+1)
+        else
+          restore; loop prev prevTail (i+1)
     else
       match prev with
       | .ok a s => restoreState s *> pure a
