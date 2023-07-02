@@ -185,6 +185,7 @@ def parserAliases :=
   |>.insert ``Parser.skip ``LParse.nop
   -- Placeholders
   |>.insert ``Parser.Command.commentBody ``LParse.dummy
+  |>.insert ``Parser.hygieneInfo ``LParse.dummy
 
 abbrev AppHandler :=
   (Expr → CompileM Term) → Array Expr → CompileM Term
