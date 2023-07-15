@@ -21,10 +21,8 @@ namespace Partax
 local instance : Coe Name Ident where
   coe := mkIdent
 
-def stripUpperPrefix : Name → Name
-| .anonymous => .anonymous
-| .str p s => if s.get 0 |>.isUpper then .anonymous else .str (stripUpperPrefix p) s
-| .num p n => .num (stripUpperPrefix p) n
+def stripPrefix (p n : Name) : Name :=
+  n.replacePrefix p .anonymous
 
 @[inline] unsafe def unsafeEvalParserDescr
 (name : Name) (env : Environment) (opts : Options) : Except String ParserDescr :=
@@ -53,6 +51,9 @@ open Parser Term in initialize
       have : Inhabited _ := ⟨m⟩
       panic! "expected alias for bracketedBinder"
 
+def undefinedGlobalName [Monad m] [MonadResolveName m] [MonadEnv m] (name : Name) : m Bool :=
+  inline <| resolveGlobalName name <&> (·.filter (·.2.isEmpty) |>.isEmpty)
+
 --------------------------------------------------------------------------------
 /-! ## Compile Monad                                                          -/
 --------------------------------------------------------------------------------
@@ -70,10 +71,10 @@ structure CompileState where
   /-- Set of definitions already compiled. -/
   compiled : NameSet := {}
 
-abbrev CompileT m := ReaderT Name <| StateT CompileState m
+abbrev CompileT m := StateT CompileState m
 
 def CompileT.run [Functor m] (x : CompileT m α) : m (Array Command) :=
-  StateT.run (ReaderT.run x .anonymous) {} <&> (·.2.defs)
+  StateT.run x {} <&> (·.2.defs)
 
 @[inline] def pushCmd [Monad m] (cmd : Command) : CompileT m PUnit :=
   modify fun s => {s with defs := s.defs.push cmd}
@@ -99,9 +100,6 @@ def withStepTrace (name : Name) (k : CompileM α) (collapsed := false) : Compile
   pushCmd <| ← `(@[inline] def $name := $(mkCIdentFrom (← getRef) alias))
 
 def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
-  let s ← get
-  let cats : NameSet := cats.fold (init := {}) fun ns n =>
-    if let some cats := s.catMap.find? n then ns.union cats else ns.insert n
   let entries ← cats.foldM (init := #[]) fun a n =>
     return a.push <| ← ``(($(quote n), $(mkIdent n)))
   let catMap ← ``((RBMap.ofList [$entries,*] : CategoryMap))
@@ -109,7 +107,8 @@ def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
 
 def pushCategoriesDefs : CompileM PUnit := do
   let s ← get; s.cats.forM fun cat => do
-    if let some cats := s.catMap.find? cat then pushCategoriesDef cat cats
+    if let some cats := s.catMap.find? cat then
+      pushCategoriesDef cat cats
 
 end
 
@@ -156,9 +155,9 @@ def parserAliases :=
   |>.insert ``Parser.pushNone ``LParse.pushNone
   |>.insert ``Parser.group ``LParse.group
   -- Combinators
-  |>.insert ``Parser.atomic ``atomic
-  |>.insert ``Parser.lookahead ``lookahead
-  |>.insert ``Parser.notFollowedBy ``notFollowedBy
+  |>.insert ``Parser.atomic ``LParse.atomic
+  |>.insert ``Parser.lookahead ``LParse.lookahead
+  |>.insert ``Parser.notFollowedBy ``LParse.notFollowedBy
   |>.insert ``Parser.optional ``LParse.optional
   |>.insert ``Parser.many ``LParse.many
   |>.insert ``Parser.many1 ``LParse.many1
@@ -180,9 +179,11 @@ def parserAliases :=
   |>.insert ``Parser.checkColGt ``LParse.checkColGt
   |>.insert ``Parser.checkColEq ``LParse.checkColEq
   |>.insert ``Parser.checkLineEq ``LParse.checkLineEq
-  |>.insert ``Parser.ppSpace ``LParse.nop
-  |>.insert ``Parser.ppLine ``LParse.nop
   |>.insert ``Parser.skip ``LParse.nop
+  |>.insert ``Parser.ppSpace ``LParse.nop
+  |>.insert ``Parser.ppHardSpace ``LParse.nop
+  |>.insert ``Parser.ppLine ``LParse.nop
+  |>.insert ``Parser.ppHardLineUnlessUngrouped ``LParse.nop
   -- Placeholders
   |>.insert ``Parser.Command.commentBody ``LParse.dummy
   |>.insert ``Parser.hygieneInfo ``LParse.dummy
@@ -198,6 +199,7 @@ def parserAppHandlers :=
   |>.insert ``ppRealFill compileArg0
   |>.insert ``ppRealGroup compileArg0
   |>.insert ``ppGroup compileArg0
+  |>.insert ``ppDedentIfGrouped compileArg0
   |>.insert ``patternIgnore compileArg0
   |>.insert ``incQuotDepth compileArg0
   |>.insert ``suppressInsideQuot compileArg0
@@ -247,8 +249,7 @@ where
 section
 open Meta Elab Term Command Syntax Parser
 
-partial def compileParserExpr
-(compileCat : Name → CompileM PUnit) (x : Expr) : CompileM Term :=
+partial def compileParserExpr (x : Expr) : CompileM Term :=
   compileExpr x
 where
   compileExpr x := do
@@ -256,7 +257,7 @@ where
     | .const name _ => do
       if let some alias := parserAliases.find? name then
         return mkCIdentFrom (← getRef) alias
-      let pName := (← read) ++ stripUpperPrefix name
+      let pName := stripPrefix `Lean.Parser name
       let some info := (← getEnv).find? name
         | return mkIdentFrom (← getRef) name -- potential local constant
       let some numArgs ← checkParserType info
@@ -294,7 +295,7 @@ where
         if let some alias := syntaxAliases.find? catName then
           return mkCIdentFrom (← getRef) alias
         else
-          compileCat catName
+          addCategory catName
           let rbp ← compileExpr args[1]!
           ``(LParse.categoryRef $(quote catName) $rbp)
       else if let some handler := parserAppHandlers.find? fname then
@@ -336,8 +337,7 @@ where
       | _ =>
         return none
 
-def compileParserDescrToExpr
-(compileCat : Name → CompileM PUnit) (descr : ParserDescr) : CompileM Expr :=
+def compileParserDescrToExpr (descr : ParserDescr) : CompileM Expr :=
   compileDescr descr
 where
   compileAlias name args := do
@@ -369,11 +369,11 @@ where
   | .parser name => do
     return mkConst name
   | .nodeWithAntiquot _name kind p => do -- No antiquote support
-    let declName := (← read) ++ stripUpperPrefix kind
+    let declName := stripPrefix `Lean.Parser kind
     unless (← checkOrMarkVisited declName) do
       withStepTrace kind do
       let x := mkAppN (mkConst ``Parser.node) #[toExpr kind, ← compileDescr p]
-      let p ← compileParserExpr compileCat x
+      let p ← compileParserExpr x
       pushDef declName p
     return mkConst declName
   | .sepBy p sep psep allowTrailingSep => do
@@ -383,13 +383,10 @@ where
     return mkAppN (mkConst ``sepBy1)
       #[← compileDescr p, toExpr sep, ← compileDescr psep, toExpr allowTrailingSep]
 
-@[inline] def compileParserDescr
-(compileCat : Name → CompileM PUnit) (descr : ParserDescr) : CompileM Term := do
-  compileParserExpr compileCat <| ← compileParserDescrToExpr compileCat descr
+@[inline] def compileParserDescr (descr : ParserDescr) : CompileM Term :=
+  compileParserDescrToExpr descr >>= compileParserExpr
 
-def compileParserInfo
-(compileCat : Name → CompileM PUnit)
-(info : ConstantInfo) : CompileM (Bool × Term) := do
+def compileParserInfo (info : ConstantInfo) : CompileM (Bool × Term) := do
   let env ← getEnv
   have : MonadLift (Except String) CommandElabM :=
     ⟨fun | .ok a => pure a | .error e => throwError e⟩
@@ -397,36 +394,31 @@ def compileParserInfo
   | .const ``Parser .. =>
     let some x := info.value?
       | throwError "cannot compile opaque definition '{info.name}'"
-    return (false, ← compileParserExpr compileCat x)
+    return (false, ← compileParserExpr x)
   | .const ``TrailingParser .. =>
     let some x := info.value?
       | throwError "cannot compile opaque definition '{info.name}'"
-    return (true, ← compileParserExpr compileCat x)
+    return (true, ← compileParserExpr x)
   | .const ``ParserDescr .. =>
     let d ← evalParserDescr info.name env (← getOptions)
-    return (false, ← compileParserDescr compileCat d)
+    return (false, ← compileParserDescr d)
   | .const ``TrailingParserDescr .. =>
     let d ← evalParserDescr info.name env (← getOptions)
-    return (true, ← compileParserDescr compileCat d)
+    return (true, ← compileParserDescr d)
   | _ =>
     throwError "expected Parser or ParserDescr at '{info.name}'"
 
-def compileParserConst
-(compileCat : Name → CompileM PUnit)
-(name : Name) : CompileM (Bool × Term) := do
+def compileParserConst (name : Name) : CompileM (Bool × Term) := do
   withStepTrace name do
   let some info := (← getEnv).find? name
     | throwError "unknown constant '{name}'"
-  inline (compileParserInfo compileCat info)
+  inline (compileParserInfo info)
 
--- Requires `mutual partial` definitions of parsers
-partial def compileParserCat
-(catName : Name) : CompileM PUnit := do
-  addCategory catName
+partial def compileParserCategory (catName : Name) : CompileM PUnit := do
   withStepTrace (``Parser.Category ++ catName) (collapsed := true) do
   if (← checkOrMarkVisited catName) then
     return
-  unless (← resolveGlobalName catName).filter (·.2.isEmpty) |>.isEmpty do
+  unless (← undefinedGlobalName catName) do
     return -- Use an existing definition if one exists
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
   let some cat := cats.find? catName
@@ -434,18 +426,17 @@ partial def compileParserCat
   let ref ← getRef
   let mut leadingPs := #[]
   let mut trailingPs := #[]
-  let currCats ← modifyGet fun s => (s.cats, {s with cats := {}})
+  let prevCats ← modifyGet fun s => (s.cats, {s with cats := {}})
   for (k, _) in cat.kinds do
-    let pName := catName ++ stripUpperPrefix k
-    modify fun s => {s with compiled := s.compiled.insert pName}
+    let pName := stripPrefix `Lean.Parser k
+    if (← checkOrMarkVisited pName) then continue
     let pId := mkIdentFrom ref pName
     let name ← resolveGlobalConstNoOverload (mkIdentFrom ref k)
     if let some alias := syntaxAliases.find? name then
       leadingPs := leadingPs.push pId
       pushAliasDef pName alias
     else
-      let (trailing, p) ← withReader (fun _ => catName) do
-        compileParserConst compileParserCat name
+      let (trailing, p) ← compileParserConst name
       if trailing then
         trailingPs := trailingPs.push pId
       else
@@ -457,10 +448,20 @@ partial def compileParserCat
       #[$[($trailingPs : LParse Syntax)],*]
   )
   pushDef catName value
+  (← get).cats.forM compileParserCategory
   modify fun s => {s with
     catMap := s.catMap.insert catName s.cats
-    cats := s.cats.union <| currCats.insert catName
+    cats := s.cats.union <| prevCats.insert catName
   }
+
+def compileParserInfoTopLevel (info : ConstantInfo) : CompileM Unit := do
+  let (_, p) ← compileParserInfo info
+  let pName := stripPrefix `Lean.Parser info.name
+  unless (← checkOrMarkVisited pName) do
+    pushDef pName p
+  (← get).cats.forM compileParserCategory
+  pushCategoriesDef .anonymous (← get).cats
+  pushCategoriesDefs
 
 end
 
@@ -473,14 +474,18 @@ open Elab Command Term PrettyPrinter
 
 syntax dry := "(" noWs &"dry" noWs ")"
 
+def traceDefs (defs : Array Command) : CommandElabM MessageData :=
+  defs.foldlM (init := "") fun str cmd =>
+    return str ++ s!"\n{(← liftCoreM <| ppCommand cmd).pretty 90}"
+
 scoped syntax "compile_parser_category " (dry)? ident : command
 elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident) => do
-  let defn := Lean.mkConst (``Parser.Category ++ cat.getId)
-  discard <| liftTermElabM <| addTermInfo cat defn
-  let defs ← compileParserCat cat.getId *> pushCategoriesDefs |>.run
-  let cmd : Command := ⟨mkNullNode defs⟩ -- ← `(mutual $defs* end)
-  trace[Partax.compile.result] ← defs.foldlM (init := "") fun str cmd =>
-    return str ++ s!"\n{(← liftCoreM <| ppCommand cmd).pretty 90}"
+  let catName := cat.getId
+  let catDef := Lean.mkConst (``Parser.Category ++ catName)
+  discard <| liftTermElabM <| addTermInfo cat catDef
+  let defs ← compileParserCategory catName *> pushCategoriesDefs |>.run
+  let cmd : Command := ⟨mkNullNode defs⟩
+  trace[Partax.compile.result] ← traceDefs defs
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd
 
 scoped syntax "compile_parser " (dry)? ident (" as " ident)? : command
@@ -489,17 +494,13 @@ elab_rules : command | `(compile_parser $[$dry?]? $id $[as $root?]?) => do
   let some info := (← getEnv).find? name
     | throwErrorAt id s!"unknown constant '{name}'"
   discard <| liftTermElabM <| addTermInfo id (mkConst name)
-  let innerRoot := stripUpperPrefix name
-  let defs ← CompileT.run do
-    let (_, p) ← compileParserInfo compileParserCat info
-    unless (← get).compiled.contains innerRoot do pushDef innerRoot p
-    pushCategoriesDefs; pushCategoriesDef .anonymous (← get).cats
-  let cmd : Command := ⟨mkNullNode defs⟩ -- ← `(mutual $defs* end)
-  trace[Partax.compile.result] ← defs.foldlM (init := "") fun str cmd =>
-    return str ++ s!"\n{(← liftCoreM <| ppCommand cmd).pretty 90}"
+  let defs ← compileParserInfoTopLevel info |>.run
+  let cmd : Command := ⟨mkNullNode defs⟩
+  trace[Partax.compile.result] ← traceDefs defs
   let ns : Name := root?.getD id |>.getId.str "lParse"
-  let outerRoot := root?.getD ns
-  let cmd ← `(namespace $ns $cmd end $ns abbrev $outerRoot := $(ns ++ innerRoot))
+  let root := root?.getD ns
+  let pName := stripPrefix `Lean.Parser name
+  let cmd ← `(namespace $ns $cmd end $ns abbrev $root := $(ns ++ pName))
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd
 
 end

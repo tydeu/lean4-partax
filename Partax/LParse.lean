@@ -88,11 +88,14 @@ nonrec def run (input : String) (p : LParse α)
     let pos := ctx.fileMap.toPosition s.pos
     .error <| mkErrorStringWithPos ctx.fileName pos (toString e)
 
-/--
-A do-nothing parser for aliasing.
-It is specialized to `LParse` for better type inference.
--/
+/-- A do-nothing parser for aliasing. -/
 @[always_inline, inline] def nop : LParse PUnit := pure ()
+
+/- `LParse` specializations for better type inference. -/
+protected abbrev atomic (p : LParse α) : LParse α := atomic p
+protected abbrev lookahead (p : LParse α) : LParse PUnit := lookahead p
+protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LParse PUnit :=
+  notFollowedBy p msg
 
 @[inline] def fail (errMsg : String := "parse failure") : LParse α := do
   throw {unexpected := errMsg}
@@ -166,7 +169,10 @@ It is specialized to `LParse` for better type inference.
 -- # Syntax-specific Parsers
 --------------------------------------------------------------------------------
 
-instance : CoeOut (LParse Syntax) (LParse (Array Syntax)) where
+instance : Coe (LParse PUnit) (LParse (Array Syntax)) where
+  coe x := Functor.mapConst #[] x
+
+instance : Coe (LParse Syntax) (LParse (Array Syntax)) where
   coe x := Array.singleton <$> x
 
 instance : CoeOut (LParse (Array (TSyntax k))) (LParse (Array Syntax)) where
@@ -227,11 +233,15 @@ def rawCh (c : Char) (trailingWs := false) : LParse (TAtom c.toString) := do
   let info := .original leading start trailing stop
   return ⟨.atom info c.toString⟩
 
-@[inline] def symbol (sym : String) : LParse (TAtom sym.trim) :=
-  atom sym.trim
+/- Prevents `isDefEq` in instance synthesis from bombing. -/
+@[irreducible, inline] def trimSym (s : String) := s.trim
+abbrev TSymbol (val : String) := TAtom (trimSym val)
 
-@[inline] def nonReservedSymbol (sym : String) (_includeIdent := false) : LParse (TAtom sym.trim) :=
-  atom sym.trim
+@[inline] def symbol (sym : String) : LParse (TSymbol sym) :=
+  atom (trimSym sym)
+
+@[inline] def nonReservedSymbol (sym : String) (_includeIdent := false) : LParse (TSymbol sym) :=
+  atom (trimSym sym)
 
 def unicodeSymbol (sym asciiSym : String) : LParse Syntax :=
   atomOf (skipString sym.trim <|> skipString asciiSym.trim)
