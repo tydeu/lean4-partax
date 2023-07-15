@@ -93,6 +93,10 @@ variable [ThrowUnexpected m]
 @[inline] def checkNotEOI (expected : List String := []) : m PUnit := do
   if (← getIsEOI) then throwUnexpectedEOI expected
 
+/-- Get the character at the parser head. Throws on end-of-input.  -/
+@[inline] def peek1 (expected : List String := [])  : m Char := do
+  checkNotEOI expected; peek
+
 /-- Advance the parser one character. Throws on end-of-input.  -/
 @[inline] def skip1 (expected : List String := [])  : m PUnit := do
   checkNotEOI expected; skip
@@ -141,7 +145,7 @@ variable [Monad m] [MonadCheckpoint m]
 Apply `p` as a single atomic parser.
 On any failure within it, the parser state is reset back to before `p`,
 and the error is re-thrown. -/
-def atomic [MonadExcept ε m] (p : m α) : m α :=
+@[inline] def atomic [MonadExcept ε m] (p : m α) : m α :=
   checkpoint fun restore => try p catch e => restore *> throw e
 
 /-- Apply `p` and backtrack unless it errors. -/
@@ -230,7 +234,7 @@ variable [Monad m] [MonadInput m] [ThrowUnexpected m]
 
 /-- Take the head character if its satisfies `p`. Otherwise, throw an error. -/
 @[always_inline, inline] def satisfy (p : Char → Bool) (expected : List String := []) : m Char := do
-  let c ← anyChar; if p c then return c else throwUnexpected s!"unexpected '{c}'" expected
+  let c ← anyChar expected; if p c then return c else throwUnexpected s!"unexpected '{c}'" expected
 
 /-- Consume the head character if its satisfies `p`. Otherwise, throw an error. -/
 @[always_inline, inline] def skipSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit :=
@@ -241,12 +245,16 @@ variable [Monad m] [MonadInput m] [ThrowUnexpected m]
   if p (← peek) then skip
 
 /-- Consume characters until one matches `p`. Consumes the matched character. -/
-@[inline] partial def skipTillSatisfy (p : Char → Bool) : m PUnit := do
-  let c ← anyChar; if p c then pure () else skipTillSatisfy p
+@[inline] partial def skipTillSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
+  let c ← anyChar expected; if p c then pure () else skipTillSatisfy p
 
 /-- Skip over a character `c` in the input. -/
 @[inline] def skipChar (c : Char) : m PUnit :=
   skipSatisfy (· = c) [s!"'{c}'"]
+
+/-- Consume characters until one matches `c`. Consumes the matched character. -/
+@[inline] def skipTillChar (c : Char) : m PUnit := do
+  skipTillSatisfy (· = c) [s!"terminating '{c}'"]
 
 /-- Matches a single whitespace character (i.e. `Char.isWhitespace`). -/
 @[inline] def wsChar : m Char := do

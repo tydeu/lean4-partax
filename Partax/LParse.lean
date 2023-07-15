@@ -15,6 +15,7 @@ namespace Partax
 export Lean.Parser (InputContext Error)
 
 abbrev FieldIdx := TSyntax fieldIdxKind
+abbrev InterpolatedStr := TSyntax interpolatedStrKind
 abbrev TAtom (val : String) := TSyntax (Name.mkSimple val)
 
 --------------------------------------------------------------------------------
@@ -35,7 +36,7 @@ structure LParseContext extends InputContext where
 structure LParseState where
   lhsPrec : Nat := 0
   pos : String.Pos := 0
-  prevWs : Substring := "".toSubstring
+  prevIgnored : Substring := "".toSubstring
 
 /-- Combinatorial, monadic parser for Lean-style parsing. -/
 abbrev LParse := ReaderT LParseContext <| EStateM Error LParseState
@@ -72,17 +73,47 @@ instance : ThrowUnexpected LParse where
 
 instance : MonadOrElse LParse := ⟨mergeOrElse⟩
 
-@[inline] def consumeWs : LParse Substring := do
-  let ws ← extractSub skipWs
-  modify ({· with prevWs := ws})
-  return ws
+partial def skipCommentBody : LParse Unit := do
+  let rec loop (nesting : Nat) := do
+    match (← anyChar) with
+    | '-' =>
+      if (← anyChar) = '/' then
+        if nesting = 0 then
+          return
+        else
+          loop (nesting-1)
+    | '/' =>
+      if (← anyChar) = '-' then
+        loop (nesting+1)
+    | _ => loop nesting
+  loop 0
+
+/-- Skip whitespace and comments. -/
+def skipIgnoredToken : LParse Unit := do
+  match (← peek) with
+  | '/' =>
+    skip
+    skipChar '-'
+    skipSatisfy fun c => c ≠ '-' ∧ c ≠ '!'
+    skipCommentBody
+  | '-' =>
+    skip
+    skipChar '-'
+    skipTillChar '\n'
+  | _ =>
+    discard wsChar
+
+@[inline] def consumeIgnored : LParse Substring := do
+  let ignored ← extractSub <| skipMany skipIgnoredToken
+  modify ({· with prevIgnored := ignored})
+  return ignored
 
 open Parser in
 nonrec def run (input : String) (p : LParse α)
 (fileName := "<string>") (rbp := 0) (cats : CategoryMap := {}) : Except String α :=
   let ictx := mkInputContext input fileName
   let ctx := {toInputContext := ictx, prec := rbp, cats}
-  match (consumeWs *> p <* checkEOI).run ctx |>.run {} with
+  match (consumeIgnored *> p <* checkEOI).run ctx |>.run {} with
   | .ok a _ => .ok a
   | .error e s =>
     let pos := ctx.fileMap.toPosition s.pos
@@ -118,7 +149,7 @@ protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LPa
 @[inline] def setLhsPrec (prec : Nat) : LParse PUnit := do
   modify ({· with lhsPrec := prec})
 
-@[inline] def getWsBefore : LParse Substring := (·.prevWs) <$> get
+@[inline] def getWsBefore : LParse Substring := (·.prevIgnored) <$> get
 
 @[inline] def checkWsBefore (errorMsg : String := "space before") : LParse PUnit := do
   if (← getWsBefore).isEmpty then fail errorMsg
@@ -188,37 +219,37 @@ def withSourceInfo (p : LParse α) : LParse (SourceInfo × α) := do
     {str := ← getInput, startPos := (← getWsBefore).stopPos, stopPos := start}
   let a ← p
   let stop ← getInputPos
-  let trailing ← consumeWs
+  let trailing ← consumeIgnored
   let info := .original leading start trailing stop
   return (info, a)
 
-def atomicIdent : LParse String := do
+def identAtom : LParse String := do
   if (← attempt <| satisfy isIdBeginEscape) then
-    extract do skipTillSatisfy isIdEndEscape
+    extract do
+      skipTillSatisfy isIdEndEscape ["end of identifier escape"]
   else
-    let id ← extract do
+    extract do
       skipSatisfy isIdFirst ["ident"]
       skipMany <| skipSatisfy isIdRest
-    if id = "_" then throwUnexpected "hole" ["ident"]
-    return id
 
 def name : LParse Name := do
   let mut n := Name.anonymous
   repeat
-    let s ← atomicIdent
+    let s ← identAtom
     n := Name.str n s
   until !(← attempt <| skipChar '.')
   return n
 
 def ident : LParse Ident := do
-  let (info, rawVal, val) ← atomic <| withSourceInfo <| withSubstring <| name
+  let (info, rawVal, val) ← atomic <| withSourceInfo <| withSubstring do
+    let n ← name; if n = `_ then throwUnexpected "hole" ["ident"] else pure n
   return ⟨.ident info rawVal val []⟩
 
-def atomOf (p : LParse PUnit) : LParse Syntax := do
+@[inline] def atomOf (p : LParse PUnit) : LParse Syntax := do
   let (info, val) ← atomic <| withSourceInfo <| extract p
   return .atom info val
 
-def atom (val : String) : LParse (TAtom val) :=
+@[inline] def atom (val : String) : LParse (TAtom val) :=
   (⟨·⟩) <$> atomOf (skipString val)
 
 def rawCh (c : Char) (trailingWs := false) : LParse (TAtom c.toString) := do
@@ -228,7 +259,7 @@ def rawCh (c : Char) (trailingWs := false) : LParse (TAtom c.toString) := do
     {str := input, startPos := (← getWsBefore).stopPos, stopPos := start}
   skipChar c
   let stop ← getInputPos
-  let trailing := if trailingWs then (← consumeWs) else
+  let trailing := if trailingWs then (← consumeIgnored) else
     {str := input, startPos := stop, stopPos := stop}
   let info := .original leading start trailing stop
   return ⟨.atom info c.toString⟩
@@ -246,7 +277,7 @@ abbrev TSymbol (val : String) := TAtom (trimSym val)
 def unicodeSymbol (sym asciiSym : String) : LParse Syntax :=
   atomOf (skipString sym.trim <|> skipString asciiSym.trim)
 
-def node (kind : SyntaxNodeKind) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
+@[inline] def node (kind : SyntaxNodeKind) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
   return ⟨.node SourceInfo.none kind (← p)⟩
 
 def leadingNode (kind : SyntaxNodeKind) (prec : Nat) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
@@ -255,25 +286,70 @@ def leadingNode (kind : SyntaxNodeKind) (prec : Nat) (p : LParse (Array Syntax))
 def trailingNode (kind : SyntaxNodeKind) (prec lhsPrec : Nat) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
   checkPrec prec; checkLhsPrec lhsPrec; let n ← node kind p; setLhsPrec prec; return n
 
-def group (p : LParse (Array Syntax)) : LParse Syntax :=
+@[inline] def group (p : LParse (Array Syntax)) : LParse Syntax :=
   node groupKind p
 
-def hole : LParse (TSyntax `Lean.Parser.Term.hole) :=
-  node `Lean.Parser.Term.hole <| atom "_"
+def commentBody : LParse Syntax :=
+  atomOf skipCommentBody
+
+def hygieneInfo : LParse HygieneInfo :=
+  node hygieneInfoKind do
+    let pos ← getInputPos
+    let str : Substring :=
+      {str := ← getInput, startPos := pos, stopPos := pos}
+    let info := SourceInfo.original str pos str pos
+    return #[.ident info str .anonymous []]
 
 def fieldIdx : LParse FieldIdx :=
   node fieldIdxKind <| Array.singleton <$> atomOf do
     skipSatisfy fun c => '1' ≤ c ∧ c ≤ '9'
     skipMany digit
 
-def strLit : LParse StrLit :=
+def skipEscapeSeq : LParse PUnit := do
+  match (← anyChar) with
+  | 'x' => discard hexDigit; discard hexDigit
+  | 'u' => discard hexDigit; discard hexDigit; discard hexDigit; discard hexDigit
+  | _ => pure ()
+
+partial def strLit : LParse StrLit :=
   node strLitKind <| Array.singleton <$> atomOf do
     skipChar '"'
-    repeat
+    let rec loop := do
       match (← anyChar) with
-      | '\\' => skip
-      | '"' => break
-      | _ => continue
+      | '\\' => skipEscapeSeq; loop
+      | '"' => return
+      | _ => loop
+    loop
+
+partial def interpolatedStr (p : LParse Syntax) : LParse InterpolatedStr :=
+  node interpolatedStrKind <| atomic do
+    let start ← getInputPos
+    let leading : Substring :=
+      {str := ← getInput, startPos := (← getWsBefore).stopPos, stopPos := start}
+    skipChar '"'
+    let rec loop (head : String.Pos) (leading : Substring) (acc : Array Syntax) := do
+      match (← anyChar) with
+      | '\\' => skipEscapeSeq; loop head leading acc
+      | '"' =>
+        let input ← getInput
+        let tail ← getInputPos
+        let trailing : Substring :=
+          {str := input, startPos := tail, stopPos := tail}
+        return acc.push <| mkNode interpolatedStrLitKind
+          #[.atom (.original leading head trailing tail) (input.extract head tail)]
+      | '{' =>
+        let input ← getInput
+        let tail ← getInputPos
+        let trailing : Substring :=
+          {str := input, startPos := tail, stopPos := tail}
+        let acc := acc.push <| mkNode interpolatedStrLitKind
+          #[.atom (.original leading head trailing tail) (input.extract head tail)]
+        let acc := acc.push <| ← p
+        let head ← getInputPos
+        skipChar '}'
+        loop head trailing acc
+      | _ => loop head leading acc
+    loop start leading #[]
 
 def charLit : LParse CharLit :=
   node charLitKind <| Array.singleton <$> atomOf do
@@ -288,10 +364,10 @@ def numLit : LParse NumLit :=
     if c = '0' then
       let b ← peek
       match b with
-      | 'b' => skipMany1 hexDigit
-      | 'o' => skipMany1 octDigit
-      | 'x' => skipMany1 bit
-      | _ => skipMany1 digit
+      | 'b' | 'B' => skip; skipMany1 bit
+      | 'o' | 'O' => skip; skipMany1 octDigit
+      | 'x' | 'X' => skip; skipMany1 hexDigit
+      | _ => skipMany digit
     else
       skipMany digit
 
@@ -381,12 +457,6 @@ def sepBy1 (p : LParse Syntax)
 @[inline] def sepBy1Indent (p : LParse Syntax)
 (sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep := false) : LParse Syntax :=
   withPosition <| sepBy1 (checkColGe *> p) sep (psep <|> checkColEq *> checkLinebreakBefore *> pushNone) allowTrailingSep
-
-def sepByIndentSemicolon (p : LParse Syntax) : LParse Syntax :=
-  sepByIndent p ";" (allowTrailingSep := true)
-
-def sepBy1IndentSemicolon (p : LParse Syntax) : LParse Syntax :=
-  sepBy1Indent p ";" (allowTrailingSep := true)
 
 @[inline] partial def trailingLoop (head : Syntax)
 (trailing : Array (LParse Syntax)) (h : trailing.size > 0) : LParse Syntax :=

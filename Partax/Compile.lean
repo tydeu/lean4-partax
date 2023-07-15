@@ -139,21 +139,23 @@ def parserAliases :=
   |>.insert ``Parser.rawCh ``LParse.rawCh
   |>.insert ``Parser.ident ``LParse.ident
   |>.insert ``Parser.rawIdent ``LParse.ident
-  |>.insert ``Parser.fieldIdx ``LParse.fieldIdx
-  |>.insert ``Parser.Term.hole ``LParse.hole
-  |>.insert ``Parser.strLit ``LParse.strLit
-  |>.insert ``Parser.charLit ``LParse.charLit
-  |>.insert ``Parser.numLit ``LParse.numLit
-  |>.insert ``Parser.scientificLit ``LParse.scientificLit
-  |>.insert ``Parser.nameLit ``LParse.nameLit
   |>.insert ``Parser.symbol ``LParse.symbol
   |>.insert ``Parser.nonReservedSymbol ``LParse.nonReservedSymbol
   |>.insert ``Parser.unicodeSymbol ``LParse.unicodeSymbol
+  |>.insert ``Parser.Command.commentBody ``LParse.commentBody
   |>.insert ``Parser.node ``LParse.node
   |>.insert ``Parser.leadingNode ``LParse.leadingNode
   |>.insert ``Parser.trailingNode ``LParse.trailingNode
   |>.insert ``Parser.pushNone ``LParse.pushNone
   |>.insert ``Parser.group ``LParse.group
+  |>.insert ``Parser.hygieneInfo ``LParse.hygieneInfo
+  |>.insert ``Parser.fieldIdx ``LParse.fieldIdx
+  |>.insert ``Parser.strLit ``LParse.strLit
+  |>.insert ``Parser.interpolatedStr ``LParse.interpolatedStr
+  |>.insert ``Parser.charLit ``LParse.charLit
+  |>.insert ``Parser.numLit ``LParse.numLit
+  |>.insert ``Parser.scientificLit ``LParse.scientificLit
+  |>.insert ``Parser.nameLit ``LParse.nameLit
   -- Combinators
   |>.insert ``Parser.atomic ``LParse.atomic
   |>.insert ``Parser.lookahead ``LParse.lookahead
@@ -184,9 +186,6 @@ def parserAliases :=
   |>.insert ``Parser.ppHardSpace ``LParse.nop
   |>.insert ``Parser.ppLine ``LParse.nop
   |>.insert ``Parser.ppHardLineUnlessUngrouped ``LParse.nop
-  -- Placeholders
-  |>.insert ``Parser.Command.commentBody ``LParse.dummy
-  |>.insert ``Parser.hygieneInfo ``LParse.dummy
 
 abbrev AppHandler :=
   (Expr → CompileM Term) → Array Expr → CompileM Term
@@ -216,7 +215,6 @@ def parserAppHandlers :=
   |>.insert ``Parser.orelse compileParserOrElse
   |>.insert ``HOrElse.hOrElse compileOrElse
   |>.insert ``parserOfStack mkDummy
-  |>.insert ``interpolatedStr mkDummy
   |>.insert ``checkStackTop mkDummy
 where
   mkDummy _ _ :=

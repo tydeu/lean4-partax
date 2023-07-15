@@ -70,9 +70,9 @@ compile_parser exWsOrNoWs
 /-
 Example of compiling a real parser
 -/
-syntax exP := Command.infix
+syntax exP := Command.docComment
 compile_parser exP
-#match_stx exP exP.lParse | infix
+#match_stx exP exP.lParse | /-- hello /- hello -/ -/
 
 /-
 Example of using our own builtin aliases (i.e., `decimal`)
