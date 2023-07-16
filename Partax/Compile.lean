@@ -427,8 +427,10 @@ partial def compileParserCategory (catName : Name) : CompileM PUnit := do
   let prevCats ← modifyGet fun s => (s.cats, {s with cats := {}})
   for (k, _) in cat.kinds do
     let pName := stripPrefix `Lean.Parser k
-    if (← checkOrMarkVisited pName) then continue
     let pId := mkIdentFrom ref pName
+    if (← checkOrMarkVisited pName) then
+      leadingPs := leadingPs.push pId
+      continue
     let name ← resolveGlobalConstNoOverload (mkIdentFrom ref k)
     if let some alias := syntaxAliases.find? name then
       leadingPs := leadingPs.push pId

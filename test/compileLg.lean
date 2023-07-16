@@ -4,8 +4,9 @@ Released under the MIT license.
 Authors: Mac Malone
 -/
 import Partax.Test
+import Partax.TestCompile
 
-open Partax Test Lean Parser
+open Partax Lean Test Parser
 
 set_option trace.Partax.compile.result true
 
@@ -22,28 +23,16 @@ Dry run compile of the whole Lean grammar
 compile_parser_category (dry) command
 
 /-
-Compile small categories first
+Test of the compiled Lean grammar
 -/
 
-compile_parser_category prio
-compile_parser_category prec
-compile_parser_category level
-compile_parser_category stx
-compile_parser_category attr
+open LParse
 
-/-
-Full compile of the remaining Lean grammar
--/
-
-namespace main
-
-compile_parser_category command
-
-section end -- prevent recompile when editing below
+#match_stx term term | true
 
 #match_stx term term | _ + 1 = 5
 
-#match_stx doElem doElem | if _ then _
+#match_stx doElem doElem | if a then _
 
 #match_stx conv conv |
   first
@@ -53,4 +42,4 @@ section end -- prevent recompile when editing below
 
 #match_stx tactic tactic | exact _
 
-#match_stx command command | axiom foo : _
+#match_stx command command | opaque foo : Nat
