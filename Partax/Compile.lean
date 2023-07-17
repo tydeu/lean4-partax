@@ -15,7 +15,7 @@ open Lean
 namespace Partax
 
 --------------------------------------------------------------------------------
-/-! ## Helpers Utilities                                                      -/
+/-! ## Helper Utilities                                                      -/
 --------------------------------------------------------------------------------
 
 local instance : Coe Name Ident where
@@ -23,6 +23,9 @@ local instance : Coe Name Ident where
 
 def stripPrefix (p n : Name) : Name :=
   n.replacePrefix p .anonymous
+
+@[implemented_by Lean.Environment.evalConstCheck] opaque evalConstCheck
+(α) (env : Environment) (opts : Options) (typeName constName : Name) : ExceptT String Id α
 
 @[inline] unsafe def unsafeEvalParserDescr
 (name : Name) (env : Environment) (opts : Options) : Except String ParserDescr :=
@@ -51,8 +54,11 @@ open Parser Term in initialize
       have : Inhabited _ := ⟨m⟩
       panic! "expected alias for bracketedBinder"
 
-def undefinedGlobalName [Monad m] [MonadResolveName m] [MonadEnv m] (name : Name) : m Bool :=
-  inline <| resolveGlobalName name <&> (·.filter (·.2.isEmpty) |>.isEmpty)
+def resolveGlobalNameNoOverload? [Monad m] [MonadResolveName m] [MonadEnv m] (name : Name) : m (Option Name) := do
+  let cs ← inline <| resolveGlobalName name
+  match cs.filter (·.2.isEmpty) with
+  | [(c, _)] => return some c
+  | _ => return none
 
 --------------------------------------------------------------------------------
 /-! ## Compile Monad                                                          -/
@@ -62,10 +68,14 @@ section
 open Elab.Command (CommandElabM)
 
 structure CompileState where
-  /-- Categories used in compiling the current parser or category. -/
+  /-- Keywords used in the compiled parser(s). -/
+  kws : NameSet := {}
+  /-- Associates each category with its used categories. -/
+  kwsMap : NameMap NameSet := {}
+  /-- Categories used in the compiled parser(s). -/
   cats : NameSet := {}
   /-- Associates each category with its used categories. -/
-  catMap : NameMap NameSet := {}
+  catsMap : NameMap NameSet := {}
   /-- Array of compiled parser definitions. -/
   defs : Array Command := #[]
   /-- Set of definitions already compiled. -/
@@ -81,6 +91,9 @@ def CompileT.run [Functor m] (x : CompileT m α) : m (Array Command) :=
 
 @[inline] def addCategory [Monad m] (name : Name) : CompileT m PUnit :=
   modify fun s => {s with cats := s.cats.insert name}
+
+@[inline] def addKeyword [Monad m] (kw : Name) : CompileT m PUnit :=
+  modify fun s => {s with kws := s.kws.insert kw}
 
 /-- Ensure `name` is marked and return whether it already was. -/
 @[inline] def checkOrMarkVisited [Monad m] (name : Name) : CompileT m Bool :=
@@ -99,6 +112,11 @@ def withStepTrace (name : Name) (k : CompileM α) (collapsed := false) : Compile
 @[inline] def pushAliasDef (name : Name) (alias : Name) : CompileM PUnit := do
   pushCmd <| ← `(@[inline] def $name := $(mkCIdentFrom (← getRef) alias))
 
+def pushKeywordsDef (ns : Name) (kws : NameSet)  : CompileM PUnit := do
+  let kws := kws.fold (init := #[]) fun a n => a.push (quote n : Term)
+  let kws ← ``((RBTree.ofList [$kws,*] : NameSet))
+  pushDef (ns.str "keywords") kws
+
 def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
   let entries ← cats.foldM (init := #[]) fun a n =>
     return a.push <| ← ``(($(quote n), $(mkIdent n)))
@@ -106,8 +124,11 @@ def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
   pushDef (ns.str "categories") catMap
 
 def pushCategoriesDefs : CompileM PUnit := do
-  let s ← get; s.cats.forM fun cat => do
-    if let some cats := s.catMap.find? cat then
+  let s ← get
+  s.cats.forM fun cat => do
+    if let some kws := s.kwsMap.find? cat then
+      pushKeywordsDef cat kws
+    if let some cats := s.catsMap.find? cat then
       pushCategoriesDef cat cats
 
 end
@@ -139,7 +160,6 @@ def parserAliases :=
   |>.insert ``Parser.rawCh ``LParse.rawCh
   |>.insert ``Parser.ident ``LParse.ident
   |>.insert ``Parser.rawIdent ``LParse.ident
-  |>.insert ``Parser.symbol ``LParse.symbol
   |>.insert ``Parser.nonReservedSymbol ``LParse.nonReservedSymbol
   |>.insert ``Parser.unicodeSymbol ``LParse.unicodeSymbol
   |>.insert ``Parser.Command.commentBody ``LParse.commentBody
@@ -296,6 +316,12 @@ where
           addCategory catName
           let rbp ← compileExpr args[1]!
           ``(LParse.categoryRef $(quote catName) $rbp)
+      else if fname = ``symbol then
+        let sym ← liftTermElabM <| liftMetaM do
+          evalExpr String (mkConst ``String) args[0]!
+        let kw := sym.trim.toName
+        unless kw.isAnonymous do addKeyword kw
+        ``(LParse.symbol $(quote sym))
       else if let some handler := parserAppHandlers.find? fname then
         handler compileExpr args
       else if let some alias := parserAliases.find? fname then
@@ -415,16 +441,24 @@ def compileParserConst (name : Name) : CompileM (Bool × Term) := do
 partial def compileParserCategory (catName : Name) : CompileM PUnit := do
   withStepTrace (``Parser.Category ++ catName) (collapsed := true) do
   if (← checkOrMarkVisited catName) then
+    modify fun s => {s with kws := s.kws.union <| s.kwsMap.find? catName |>.getD {}}
     return
-  unless (← undefinedGlobalName catName) do
-    return -- Use an existing definition if one exists
+  -- Use an existing definition if one exists
+  if let some catConst ← resolveGlobalNameNoOverload? catName then
+    let kws ← do
+      match evalConstCheck NameSet (← getEnv) (← getOptions) ``NameSet catConst with
+      | .ok kws => pure kws
+      | .error e => throwError e
+    modify fun s => {s with kws := s.kws.union kws}
+    return
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
   let some cat := cats.find? catName
     | throwError "cannot compile unknown category `{catName}`"
   let ref ← getRef
   let mut leadingPs := #[]
   let mut trailingPs := #[]
-  let prevCats ← modifyGet fun s => (s.cats, {s with cats := {}})
+  let (prevKws, prevCats) ← modifyGet fun s =>
+    ((s.kws, s.cats), {s with kws := {}, cats := {}})
   for (k, _) in cat.kinds do
     let pName := stripPrefix `Lean.Parser k
     let pId := mkIdentFrom ref pName
@@ -450,8 +484,10 @@ partial def compileParserCategory (catName : Name) : CompileM PUnit := do
   pushDef catName value
   (← get).cats.forM compileParserCategory
   modify fun s => {s with
-    catMap := s.catMap.insert catName s.cats
+    kws := s.kws.union <| prevKws
+    kwsMap := s.kwsMap.insert catName s.kws
     cats := s.cats.union <| prevCats.insert catName
+    catsMap := s.catsMap.insert catName s.cats
   }
 
 def compileParserInfoTopLevel (info : ConstantInfo) : CompileM Unit := do
@@ -460,7 +496,9 @@ def compileParserInfoTopLevel (info : ConstantInfo) : CompileM Unit := do
   unless (← checkOrMarkVisited pName) do
     pushDef pName p
   (← get).cats.forM compileParserCategory
-  pushCategoriesDef .anonymous (← get).cats
+  let s ← get
+  pushCategoriesDef .anonymous s.cats
+  pushKeywordsDef .anonymous s.kws
   pushCategoriesDefs
 
 end

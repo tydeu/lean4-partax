@@ -33,6 +33,7 @@ structure LParseContext extends InputContext where
   prec : Nat := 0
   savedPos? : Option String.Pos := none
   cats : CategoryMap := {}
+  kws : NameSet := {}
 
 structure LParseState where
   lhsPrec : Nat := 0
@@ -110,10 +111,10 @@ def skipIgnoredToken : LParse Unit := atomic do
   return ignored
 
 open Parser in
-nonrec def run (input : String) (p : LParse α)
-(fileName := "<string>") (rbp := 0) (cats : CategoryMap := {}) : Except String α :=
+nonrec def run (input : String) (p : LParse α) (fileName := "<string>")
+(rbp := 0) (cats : CategoryMap := {}) (kws : NameSet := {}) : Except String α :=
   let ictx := mkInputContext input fileName
-  let ctx := {toInputContext := ictx, prec := rbp, cats}
+  let ctx := {toInputContext := ictx, prec := rbp, cats, kws}
   match (consumeIgnored *> p <* checkEOI).run ctx |>.run {} with
   | .ok a _ => .ok a
   | .error e s =>
@@ -244,7 +245,11 @@ def name : LParse Name := do
 
 def ident : LParse Ident := do
   let (info, rawVal, val) ← atomic <| withSourceInfo <| withSubstring do
-    let n ← name; if n = `_ then throwUnexpected "hole" ["ident"] else pure n
+    let n ← name
+    if (← read).kws.contains n then
+      throwUnexpected s!"unexpected keyword '{n}'" ["ident"]
+    else
+      pure n
   return ⟨.ident info rawVal val []⟩
 
 @[inline] def atomOf (p : LParse PUnit) : LParse Syntax := do

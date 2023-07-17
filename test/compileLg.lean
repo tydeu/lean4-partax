@@ -25,7 +25,7 @@ open LCompile
 #match_stx term term | 2 + 2 = 4
 
 #match_stx doElem doElem | return ()
---#match_stx doElem doElem | if a then _
+#match_stx doElem doElem | if a then _
 
 #match_stx conv conv |
   first

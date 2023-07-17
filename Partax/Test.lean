@@ -39,13 +39,19 @@ def matchStxFn (pstx : Syntax) (stx : Syntax) : Except String Syntax := do
   if pstx == stx then return pstx
   throw <| s!"parsed:\n{pstx}\nexpected:\n{stx}\n"
 
+@[inline] def Macro.undefinedGlobalName (name : Name) : MacroM Bool := do
+  return (← Macro.resolveGlobalName name).filter (·.2.isEmpty) |>.isEmpty
+
 @[macro matchStx] def expandMatchStx : Macro := fun matchStx => do
   let p : Ident := ⟨matchStx[2]⟩; let stx := matchStx[4]
   let some src := stx.updateTrailing "".toSubstring |>.reprint
     | Macro.throwError "cannot reprint syntax"
+  let kwsName := p.getId ++ `keywords
   let catsName := p.getId ++ `categories
-  if (← Macro.resolveGlobalName catsName).filter (·.2.isEmpty) |>.isEmpty then
-    `(#eval $(p).run $(quote src) >>= (matchStxFn · $(quoteSyntax stx)))
+  let test ← `((matchStxFn · $(quoteSyntax stx)))
+  if (← Macro.undefinedGlobalName catsName) then
+    `(#eval $(p).run $(quote src) >>= $test)
   else
+    let kws := mkIdentFrom p kwsName
     let cats := mkIdentFrom p catsName
-    `(#eval $(p).run $(quote src) (cats := $cats) >>= (matchStxFn · $(quoteSyntax stx)))
+    `(#eval $(p).run $(quote src) (cats := $cats) (kws := $kws) >>= $test)

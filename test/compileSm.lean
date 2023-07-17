@@ -123,7 +123,7 @@ compile_parser_category stx
 
 compile_parser_category attr
 #match_stx attr attr | custom (high + default)
---#match_stx attr attr | instance (high + default)  -- TODO: ident clash
+#match_stx attr attr | instance (high + default)
 
 end ex
 
