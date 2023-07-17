@@ -125,7 +125,7 @@ def decimal : LParse Syntax := atomOf do
   skipMany digit
 
 @[inline] def dummy : LParse Syntax := do
-  fail "dummy parser"
+  error "dummy parser"
 
 end LParse
 

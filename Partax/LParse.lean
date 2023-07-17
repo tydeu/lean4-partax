@@ -16,7 +16,6 @@ export Lean.Parser (InputContext Error)
 
 abbrev FieldIdx := TSyntax fieldIdxKind
 abbrev InterpolatedStr := TSyntax interpolatedStrKind
-abbrev TAtom (val : String) := TSyntax (Name.mkSimple val)
 
 --------------------------------------------------------------------------------
 -- # LParse Type for Parsing Syntax
@@ -28,6 +27,8 @@ def OpaqueLParse (α : Type α) : Type := OpaqueLParse.nonemptyType α |>.type
 instance : Nonempty (OpaqueLParse α) :=  OpaqueLParse.nonemptyType α |>.property
 
 abbrev CategoryMap := NameMap (OpaqueLParse Syntax)
+@[inline] def CategoryMap.empty : CategoryMap := {}
+
 structure LParseContext extends InputContext where
   prec : Nat := 0
   savedPos? : Option String.Pos := none
@@ -75,21 +76,21 @@ instance : MonadOrElse LParse := ⟨mergeOrElse⟩
 
 partial def skipCommentBody : LParse Unit := do
   let rec loop (nesting : Nat) := do
-    match (← anyChar) with
+    match (← next1) with
     | '-' =>
-      if (← anyChar) = '/' then
+      if (← next1) = '/' then
         if nesting = 0 then
           return
         else
           loop (nesting-1)
     | '/' =>
-      if (← anyChar) = '-' then
+      if (← next1) = '-' then
         loop (nesting+1)
     | _ => loop nesting
   loop 0
 
 /-- Skip whitespace and comments. -/
-def skipIgnoredToken : LParse Unit := do
+def skipIgnoredToken : LParse Unit := atomic do
   match (← peek) with
   | '/' =>
     skip
@@ -128,8 +129,8 @@ protected abbrev lookahead (p : LParse α) : LParse PUnit := lookahead p
 protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LParse PUnit :=
   notFollowedBy p msg
 
-@[inline] def fail (errMsg : String := "parse failure") : LParse α := do
-  throw {unexpected := errMsg}
+@[inline] def error (msg : String := "parse failure") : LParse α := do
+  throw {unexpected := msg}
 
 @[noinline] def unexpectedPrecMessage : String :=
   "unexpected token at this precedence level; consider parenthesizing the term"
@@ -137,11 +138,11 @@ protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LPa
 @[inline] def throwUnexpectedPrec : LParse PUnit :=
   throwUnexpected unexpectedPrecMessage
 
-@[inline] def checkPrec (prec : Nat) : LParse PUnit := do
-  unless (← read).prec ≤ prec do throwUnexpectedPrec
-
 @[inline] def withPrec (prec : Nat) (p : LParse α) : LParse α := do
   withReader ({· with prec}) p
+
+@[inline] def checkPrec (prec : Nat) : LParse PUnit := do
+  unless (← read).prec ≤ prec do throwUnexpectedPrec
 
 @[inline] def checkLhsPrec (prec : Nat) : LParse PUnit := do
   unless (← get).lhsPrec ≥ prec do throwUnexpectedPrec
@@ -152,13 +153,13 @@ protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LPa
 @[inline] def getWsBefore : LParse Substring := (·.prevIgnored) <$> get
 
 @[inline] def checkWsBefore (errorMsg : String := "space before") : LParse PUnit := do
-  if (← getWsBefore).isEmpty then fail errorMsg
+  if (← getWsBefore).isEmpty then error errorMsg
 
 @[inline] def checkNoWsBefore (errorMsg : String := "no space before") : LParse PUnit := do
-  unless (← getWsBefore).isEmpty do fail errorMsg
+  unless (← getWsBefore).isEmpty do error errorMsg
 
 @[inline] def checkLinebreakBefore (errorMsg : String := "line break") : LParse PUnit := do
-  unless (← getWsBefore).contains '\n' do fail errorMsg
+  unless (← getWsBefore).contains '\n' do error errorMsg
 
 @[inline] def withSavedPos (savedPos? : Option String.Pos) (p : LParse α) : LParse α := do
   withReader ({· with savedPos?}) p
@@ -172,12 +173,13 @@ protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LPa
 @[inline] def withoutPosition (p : LParse α) : LParse α := do
   withSavedPos none p
 
-@[inline] def errorAtSavedPos (msg : String) (delta : Bool) : LParse PUnit := do
+@[inline, inherit_doc Parser.errorAtSavedPos]
+def errorAtSavedPos (msg : String) (delta : Bool) : LParse PUnit := do
   if let some pos := (← read).savedPos? then
-    setInputPos <| if delta then (← getInput).next pos else pos
+    if delta then setInputPos <| (← getInput).next pos
     throwUnexpected msg
 
-@[inline] def compareToSavedPos (f : Position → Position → Bool) (errorMsg : String) : LParse PUnit := do
+@[inline] def checkSavedPos (f : Position → Position → Bool) (errorMsg : String) : LParse PUnit := do
   let ctx ← read
   if let some savedPos := ctx.savedPos? then
     let savedPos := ctx.fileMap.toPosition savedPos
@@ -185,16 +187,16 @@ protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LPa
     unless f pos savedPos do throwUnexpected errorMsg
 
 @[inline] def checkColGe (errorMsg : String := "checkColGe") : LParse PUnit := do
-  compareToSavedPos (·.column ≥ ·.column) errorMsg
+  checkSavedPos (·.column ≥ ·.column) errorMsg
 
 @[inline] def checkColGt (errorMsg : String := "checkColGt") : LParse PUnit := do
-  compareToSavedPos (·.column > ·.column) errorMsg
+  checkSavedPos (·.column > ·.column) errorMsg
 
 @[inline] def checkColEq (errorMsg : String := "checkColEq") : LParse PUnit := do
-  compareToSavedPos (·.column = ·.column) errorMsg
+  checkSavedPos (·.column = ·.column) errorMsg
 
 @[inline] def checkLineEq (errorMsg : String := "checkLineEq") : LParse PUnit := do
-  compareToSavedPos (·.line = ·.line) errorMsg
+  checkSavedPos (·.line = ·.line) errorMsg
 
 --------------------------------------------------------------------------------
 -- # Syntax-specific Parsers
@@ -249,10 +251,10 @@ def ident : LParse Ident := do
   let (info, val) ← atomic <| withSourceInfo <| extract p
   return .atom info val
 
-@[inline] def atom (val : String) : LParse (TAtom val) :=
-  (⟨·⟩) <$> atomOf (skipString val)
+@[inline] def atom (val : String) : LParse Syntax :=
+  atomOf (skipString val)
 
-def rawCh (c : Char) (trailingWs := false) : LParse (TAtom c.toString) := do
+def rawCh (c : Char) (trailingWs := false) : LParse Syntax := do
   let input ← getInput
   let start ← getInputPos
   let leading : Substring :=
@@ -262,28 +264,24 @@ def rawCh (c : Char) (trailingWs := false) : LParse (TAtom c.toString) := do
   let trailing := if trailingWs then (← consumeIgnored) else
     {str := input, startPos := stop, stopPos := stop}
   let info := .original leading start trailing stop
-  return ⟨.atom info c.toString⟩
+  return .atom info c.toString
 
-/- Prevents `isDefEq` in instance synthesis from bombing. -/
-@[irreducible, inline] def trimSym (s : String) := s.trim
-abbrev TSymbol (val : String) := TAtom (trimSym val)
+@[inline] def symbol (sym : String) : LParse Syntax :=
+  atom sym.trim
 
-@[inline] def symbol (sym : String) : LParse (TSymbol sym) :=
-  atom (trimSym sym)
-
-@[inline] def nonReservedSymbol (sym : String) (_includeIdent := false) : LParse (TSymbol sym) :=
-  atom (trimSym sym)
+@[inline] def nonReservedSymbol (sym : String) (_includeIdent := false) : LParse Syntax :=
+  atom sym.trim
 
 def unicodeSymbol (sym asciiSym : String) : LParse Syntax :=
   atomOf (skipString sym.trim <|> skipString asciiSym.trim)
 
 @[inline] def node (kind : SyntaxNodeKind) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
-  return ⟨.node SourceInfo.none kind (← p)⟩
+  return ⟨.node .none kind (← p)⟩
 
-def leadingNode (kind : SyntaxNodeKind) (prec : Nat) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
+@[inline] def leadingNode (kind : SyntaxNodeKind) (prec : Nat) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
   checkPrec prec; let n ← node kind p; setLhsPrec prec; return n
 
-def trailingNode (kind : SyntaxNodeKind) (prec lhsPrec : Nat) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
+@[inline] def trailingNode (kind : SyntaxNodeKind) (prec lhsPrec : Nat) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
   checkPrec prec; checkLhsPrec lhsPrec; let n ← node kind p; setLhsPrec prec; return n
 
 @[inline] def group (p : LParse (Array Syntax)) : LParse Syntax :=
@@ -306,7 +304,7 @@ def fieldIdx : LParse FieldIdx :=
     skipMany digit
 
 def skipEscapeSeq : LParse PUnit := do
-  match (← anyChar) with
+  match (← next1) with
   | 'x' => discard hexDigit; discard hexDigit
   | 'u' => discard hexDigit; discard hexDigit; discard hexDigit; discard hexDigit
   | _ => pure ()
@@ -315,7 +313,7 @@ partial def strLit : LParse StrLit :=
   node strLitKind <| Array.singleton <$> atomOf do
     skipChar '"'
     let rec loop := do
-      match (← anyChar) with
+      match (← next1) with
       | '\\' => skipEscapeSeq; loop
       | '"' => return
       | _ => loop
@@ -328,7 +326,7 @@ partial def interpolatedStr (p : LParse Syntax) : LParse InterpolatedStr :=
       {str := ← getInput, startPos := (← getWsBefore).stopPos, stopPos := start}
     skipChar '"'
     let rec loop (head : String.Pos) (leading : Substring) (acc : Array Syntax) := do
-      match (← anyChar) with
+      match (← next1) with
       | '\\' => skipEscapeSeq; loop head leading acc
       | '"' =>
         let input ← getInput
@@ -354,7 +352,7 @@ partial def interpolatedStr (p : LParse Syntax) : LParse InterpolatedStr :=
 def charLit : LParse CharLit :=
   node charLitKind <| Array.singleton <$> atomOf do
     skipChar '\''
-    if (← anyChar) = '\\' then
+    if (← next1) = '\\' then
       skipSatisfy Parser.isQuotableCharDefault
     skipChar '\''
 
@@ -375,9 +373,9 @@ def scientificLit : LParse ScientificLit :=
   node scientificLitKind <| Array.singleton <$> atomOf do
     skipMany1 digit
     let expected := ["'.'", "'e'", "'E'"]
-    let c ← anyChar expected
+    let c ← next1 expected
     if c == '.' then
-      skipMany1 digit
+      skipMany digit
     else if c == 'e' || c == 'E' then
       skipIfSatisfy fun c => c == '-' || c == '+'
       skipMany1 digit
@@ -473,8 +471,9 @@ where
     | .error e =>
       if iniPos < (← getInputPos) then throw e else restore; return head
 
-/-- Pratt parse a category with the given `leading` and `trailing` parsers. -/
+/-- Parse a category with the given `leading` and `trailing` parsers. -/
 def category (name : Name) (leading trailing : Array (LParse Syntax)) : LParse (TSyntax name) := do
+  setLhsPrec Parser.maxPrec
   if h : leading.size > 0 then
     let head ← longestMatch leading h Parser.Error.merge
     if h : trailing.size > 0 then

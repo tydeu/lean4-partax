@@ -66,6 +66,10 @@ instance [Alternative m] : MonadOrElse m where
 section
 variable [Monad m] [MonadInput m]
 
+/-- Check if the parser is at the end of input. -/
+@[inline] def getIsEOI : m Bool := do
+  return (← getInput).atEnd (← getInputPos)
+
 /-- Get the character at the parser head. Does not check for end-of-input. -/
 @[inline] def peek : m Char := do
   return (← getInput).get (← getInputPos)
@@ -77,10 +81,6 @@ variable [Monad m] [MonadInput m]
 /-- Returns the next character in the input. Does not check for end-of-input. -/
 @[inline] def next : m Char := do
   let c ← peek; skip; return c
-
-/-- Check if the parser is at the end of input. -/
-@[inline] def getIsEOI : m Bool := do
-  return (← getInput).atEnd (← getInputPos)
 
 variable [ThrowUnexpected m]
 
@@ -102,7 +102,7 @@ variable [ThrowUnexpected m]
   checkNotEOI expected; skip
 
 /-- Returns the next character in the input. Throws on end-of-input.  -/
-@[inline] def anyChar (expected : List String := []) : m Char := do
+@[inline] def next1 (expected : List String := []) : m Char := do
   checkNotEOI expected; next
 
 end
@@ -234,7 +234,7 @@ variable [Monad m] [MonadInput m] [ThrowUnexpected m]
 
 /-- Take the head character if its satisfies `p`. Otherwise, throw an error. -/
 @[always_inline, inline] def satisfy (p : Char → Bool) (expected : List String := []) : m Char := do
-  let c ← anyChar expected; if p c then return c else throwUnexpected s!"unexpected '{c}'" expected
+  let c ← next1 expected; if p c then return c else throwUnexpected s!"unexpected '{c}'" expected
 
 /-- Consume the head character if its satisfies `p`. Otherwise, throw an error. -/
 @[always_inline, inline] def skipSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit :=
@@ -246,7 +246,7 @@ variable [Monad m] [MonadInput m] [ThrowUnexpected m]
 
 /-- Consume characters until one matches `p`. Consumes the matched character. -/
 @[inline] partial def skipTillSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
-  let c ← anyChar expected; if p c then pure () else skipTillSatisfy p
+  let c ← next1 expected; if p c then pure () else skipTillSatisfy p
 
 /-- Skip over a character `c` in the input. -/
 @[inline] def skipChar (c : Char) : m PUnit :=

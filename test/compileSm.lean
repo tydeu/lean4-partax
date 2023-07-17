@@ -8,7 +8,7 @@ import Partax.Test
 open Partax Test Lean Parser
 
 /-! # Small Compile Tests
-Examples of small fragments of syntax.
+Examples of syntax compilations with short runtimes.
 -/
 
 set_option trace.Partax.compile true
@@ -124,3 +124,13 @@ compile_parser_category stx
 compile_parser_category attr
 #match_stx attr attr | custom (high + default)
 --#match_stx attr attr | instance (high + default)  -- TODO: ident clash
+
+end ex
+
+/-
+Dry run compile of the whole Lean grammar
+-/
+namespace ex'
+set_option trace.Partax.compile.result true in
+compile_parser_category (dry) command
+end ex'

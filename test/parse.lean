@@ -19,6 +19,7 @@ Verify that simple parsers work properly.
 #match_stx numLit LParse.numLit | 0o7
 
 #match_stx strLit LParse.strLit | "hello\nhello"
+#match_stx scientificLit LParse.scientificLit | 2.
 #match_stx ident LParse.ident | foo.bar
 
 def leftArrow := LParse.unicodeSymbol "← " "<- "

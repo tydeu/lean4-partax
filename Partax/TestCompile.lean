@@ -9,6 +9,8 @@ import Partax.Compile
 Test helper which compiles the entire Lean grammar.
 -/
 
-namespace Partax.Test.LParse
+open scoped Lean
+namespace Partax.Test.LCompile
 
+set_option trace.Partax.compile.result true in
 compile_parser_category command
