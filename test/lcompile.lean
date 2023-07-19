@@ -3,20 +3,14 @@ Copyright (c) 2023 Mac Malone. All rights reserved.
 Released under the MIT license.
 Authors: Mac Malone
 -/
-import Partax.Test
-import Partax.TestCompile
+import Partax.Test.Basic
+import Partax.Test.LCompile
 
-/-! # Large Compile Tests
-Test of compiling large Lean categories.
+/-! # Lean Compile Tests
+Tests of the whole compiled Lean grammar.
 -/
 
-open Partax Test
-
-/-
-Test of the compiled Lean grammar
--/
-
-open LCompile
+open Partax Test LCompile
 
 #match_stx term term | true
 

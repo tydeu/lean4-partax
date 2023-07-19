@@ -3,13 +3,13 @@ Copyright (c) 2021 Mac Malone. All rights reserved.
 Released under the MIT license.
 Authors: Mac Malone
 -/
-import Partax.Test
 import Partax.Compile
+import Partax.Test.Basic
 
 open Partax Test Lean Parser
 
-/-! # Small Compile Tests
-Examples of syntax compilations with short runtimes.
+/-! # Basic Compile Tests
+Examples of syntax compilations with relatively short run times.
 -/
 
 set_option trace.Partax.compile true
