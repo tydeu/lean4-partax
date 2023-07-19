@@ -64,22 +64,50 @@ def resolveGlobalNameNoOverload? [Monad m] [MonadResolveName m] [MonadEnv m] (na
 /-! ## Compile Monad                                                          -/
 --------------------------------------------------------------------------------
 
+@[inline] def KeywordSet.ofList (kws : List Name) : NameSet :=
+  kws.foldl (init := {}) fun s kw => s.insert kw
+
+abbrev SymbolSet := RBTree String compare
+@[inline] def SymbolSet.empty : SymbolSet := {}
+
+@[inline] partial def SymbolTrie.toSet (trie : SymbolTrie) : SymbolSet :=
+  go {} trie
+where
+  go s
+  | .Node sym? map =>
+    let s := if let some sym := sym? then s.insert sym else s
+    map.fold (init := s) fun s _ t => go s t
+
+@[inline] def CategoryMap.toSet (map : CategoryMap) : NameSet :=
+  map.fold (init := {}) fun s k _ => s.insert k
+
 section
 open Elab.Command (CommandElabM)
 
-structure CompileState where
-  /-- Keywords used in the compiled parser(s). -/
+/-- Metadata for a compiled parser. -/
+structure ParserData where
+  /-- Keywords used in the parser(s). -/
   kws : NameSet := {}
-  /-- Associates each category with its used categories. -/
-  kwsMap : NameMap NameSet := {}
-  /-- Categories used in the compiled parser(s). -/
+  /-- Symbols used in the parser(s). -/
+  syms : SymbolSet := {}
+  /-- Categories used in the parser(s). -/
   cats : NameSet := {}
-  /-- Associates each category with its used categories. -/
-  catsMap : NameMap NameSet := {}
+
+@[inline] def ParserData.union (a b : ParserData) : ParserData where
+  kws := a.kws.union b.kws
+  syms := a.syms.union b.syms
+  cats := a.cats.union b.cats
+
+@[inline] def ParserData.addCategory (cat : Name) (self : ParserData) : ParserData :=
+  {self with cats := self.cats.insert cat}
+
+structure CompileState extends ParserData where
   /-- Array of compiled parser definitions. -/
   defs : Array Command := #[]
   /-- Set of definitions already compiled. -/
   compiled : NameSet := {}
+  /-- Compilation metadata for each parser definition. -/
+  dataMap : NameMap ParserData := {}
 
 abbrev CompileT m := StateT CompileState m
 
@@ -89,11 +117,21 @@ def CompileT.run [Functor m] (x : CompileT m α) : m (Array Command) :=
 @[inline] def pushCmd [Monad m] (cmd : Command) : CompileT m PUnit :=
   modify fun s => {s with defs := s.defs.push cmd}
 
+@[inline] def addKeyword [Monad m] (kw : Name) : CompileT m PUnit :=
+  modify fun s => {s with kws := s.kws.insert kw}
+
+@[inline] def addSymbol [Monad m] (sym : String) : CompileT m PUnit :=
+  modify fun s => {s with syms := s.syms.insert sym}
+
 @[inline] def addCategory [Monad m] (name : Name) : CompileT m PUnit :=
   modify fun s => {s with cats := s.cats.insert name}
 
-@[inline] def addKeyword [Monad m] (kw : Name) : CompileT m PUnit :=
-  modify fun s => {s with kws := s.kws.insert kw}
+@[inline] def addParserData [Monad m] (p : Name) : CompileT m PUnit := modify fun s =>
+  if let some data := s.dataMap.find? p then
+    {s with toParserData := s.toParserData.union data}
+  else
+    have : Inhabited CompileState := ⟨s⟩
+    panic! s!"missing date for parser '{p}'"
 
 /-- Ensure `name` is marked and return whether it already was. -/
 @[inline] def checkOrMarkVisited [Monad m] (name : Name) : CompileT m Bool :=
@@ -106,6 +144,16 @@ abbrev CompileM := CompileT CommandElabM
 def withStepTrace (name : Name) (k : CompileM α) (collapsed := false) : CompileM α := do
   inline <| withTraceNode `Partax.compile.step (fun _ => return mkConst name) k collapsed
 
+@[inline] def collectParserDataFor (pName : Name) (act : CompileM α) : CompileM α := do
+  let iniData ← modifyGet fun s =>
+    (s.toParserData, {s with toParserData := {}})
+  let a ← act
+  modify fun s => {s with
+    toParserData := iniData.union s.toParserData
+    dataMap := s.dataMap.insert pName s.toParserData
+  }
+  return a
+
 @[inline] def pushDef (name : Name) (value : Term) : CompileM PUnit := do
   pushCmd <| ← `(def $name := $value)
 
@@ -114,22 +162,33 @@ def withStepTrace (name : Name) (k : CompileM α) (collapsed := false) : Compile
 
 def pushKeywordsDef (ns : Name) (kws : NameSet)  : CompileM PUnit := do
   let kws := kws.fold (init := #[]) fun a n => a.push (quote n : Term)
-  let kws ← ``((RBTree.ofList [$kws,*] : NameSet))
+  let kws ← ``(KeywordSet.ofList [$kws,*])
   pushDef (ns.str "keywords") kws
 
+def pushSymbolsDef (ns : Name) (syms : SymbolSet)  : CompileM PUnit := do
+  let syms := syms.fold (init := #[]) fun a s => a.push (quote s : Term)
+  let trie ← ``(SymbolTrie.ofList [$syms,*])
+  pushDef (ns.str "symbols") trie
+
 def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
-  let entries ← cats.foldM (init := #[]) fun a n =>
+  let xs ← cats.foldM (init := #[]) fun a n =>
     return a.push <| ← ``(($(quote n), $(mkIdent n)))
-  let catMap ← ``((RBMap.ofList [$entries,*] : CategoryMap))
+  let catMap ← ``(CategoryMap.ofList [$xs,*])
   pushDef (ns.str "categories") catMap
 
-def pushCategoriesDefs : CompileM PUnit := do
-  let s ← get
-  s.cats.forM fun cat => do
-    if let some kws := s.kwsMap.find? cat then
-      pushKeywordsDef cat kws
-    if let some cats := s.catsMap.find? cat then
-      pushCategoriesDef cat cats
+@[inline] def pushParserDataDefs
+(ns : Name) (data : ParserData) : CompileM PUnit := do
+  pushKeywordsDef ns data.kws
+  pushSymbolsDef ns data.syms
+  pushCategoriesDef ns data.cats
+
+@[inline] def pushCategoriesDataDefs : CompileM PUnit := do
+  let s ← get; s.cats.forM fun cat => do
+    if (← resolveGlobalNameNoOverload? cat).isNone then
+      if let some data := s.dataMap.find? cat then
+        pushParserDataDefs cat data
+      else
+        throwError "missing date for category '{cat}'"
 
 end
 
@@ -282,6 +341,7 @@ where
         | return mkIdentFrom (← getRef) name
       withTraceNode `Partax.compile.step (fun _ => return mkConst name) do
       if (← checkOrMarkVisited pName) then
+        addParserData pName
         return mkIdentFrom (← getRef) pName
       if numArgs > 0 then
         throwError "cannot compile parameterized parser {name}"
@@ -289,7 +349,7 @@ where
         | throwError "cannot compile opaque definition '{name}'"
       if p.isAppOf ``Parser.mk then
         throwError "cannot compile primitive parser '{name}'"
-      pushDef pName <| ← compileExpr p
+      collectParserDataFor pName do pushDef pName <| ← compileExpr p
       return mkIdentFrom (← getRef) pName
     | .app .. => do
       let fn := x.getAppFn
@@ -319,9 +379,14 @@ where
       else if fname = ``symbol then
         let sym ← liftTermElabM <| liftMetaM do
           evalExpr String (mkConst ``String) args[0]!
-        let kw := sym.trim.toName
-        unless kw.isAnonymous do addKeyword kw
-        ``(LParse.symbol $(quote sym))
+        let sym := sym.trim
+        let kw := sym.toName
+        if kw.isAnonymous then
+          addSymbol sym
+          ``(LParse.symbol $(quote sym))
+        else
+          addKeyword kw
+          ``(LParse.keyword $(quote kw))
       else if let some handler := parserAppHandlers.find? fname then
         handler compileExpr args
       else if let some alias := parserAliases.find? fname then
@@ -393,9 +458,12 @@ where
   | .parser name => do
     return mkConst name
   | .nodeWithAntiquot _name kind p => do -- No antiquote support
+    withStepTrace kind do
     let declName := stripPrefix `Lean.Parser kind
-    unless (← checkOrMarkVisited declName) do
-      withStepTrace kind do
+    if (← checkOrMarkVisited declName) then
+      addParserData declName
+    else
+      collectParserDataFor declName do
       let x := mkAppN (mkConst ``Parser.node) #[toExpr kind, ← compileDescr p]
       let p ← compileParserExpr x
       pushDef declName p
@@ -433,7 +501,7 @@ def compileParserInfo (info : ConstantInfo) : CompileM (Bool × Term) := do
     throwError "expected Parser or ParserDescr at '{info.name}'"
 
 def compileParserConst (name : Name) : CompileM (Bool × Term) := do
-  withStepTrace name do
+  withStepTrace name (collapsed := true) do
   let some info := (← getEnv).find? name
     | throwError "unknown constant '{name}'"
   inline (compileParserInfo info)
@@ -441,15 +509,26 @@ def compileParserConst (name : Name) : CompileM (Bool × Term) := do
 partial def compileParserCategory (catName : Name) : CompileM PUnit := do
   withStepTrace (``Parser.Category ++ catName) (collapsed := true) do
   if (← checkOrMarkVisited catName) then
-    modify fun s => {s with kws := s.kws.union <| s.kwsMap.find? catName |>.getD {}}
+    modify fun s =>
+      if let some data := s.dataMap.find? catName then
+        {s with toParserData := s.toParserData.union data |>.addCategory catName}
+      else
+        have : Inhabited CompileState := ⟨s⟩
+        panic! s!"missing date for category '{catName}'"
     return
   -- Use an existing definition if one exists
   if let some catConst ← resolveGlobalNameNoOverload? catName then
-    let kws ← do
-      match evalConstCheck NameSet (← getEnv) (← getOptions) ``NameSet catConst with
-      | .ok kws => pure kws
-      | .error e => throwError e
-    modify fun s => {s with kws := s.kws.union kws}
+    let .ok kws := evalConstCheck NameSet (← getEnv) (← getOptions) ``NameSet (catConst.str "keywords")
+      | throwError "category parser '{catConst}' is missing a 'keywords : NameSet' definition"
+    let .ok syms := evalConstCheck SymbolTrie (← getEnv) (← getOptions) ``SymbolTrie (catConst.str "symbols")
+      | throwError "category parser '{catConst}' is missing a 'symbols : SymbolTrie' definition"
+    let .ok cats := evalConstCheck CategoryMap (← getEnv) (← getOptions) ``CategoryMap (catConst.str "categories")
+      | throwError "category parser '{catConst}' is missing a 'categories : CategoryMap' definition"
+    let data : ParserData := {kws, syms := syms.toSet, cats := cats.toSet}
+    modify fun s => {s with
+      toParserData := s.toParserData.union data |>.addCategory catName
+      dataMap := s.dataMap.insert catName data
+    }
     return
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
   let some cat := cats.find? catName
@@ -457,12 +536,15 @@ partial def compileParserCategory (catName : Name) : CompileM PUnit := do
   let ref ← getRef
   let mut leadingPs := #[]
   let mut trailingPs := #[]
-  let (prevKws, prevCats) ← modifyGet fun s =>
-    ((s.kws, s.cats), {s with kws := {}, cats := {}})
+  let ⟨prevKws, prevSyms, prevCats⟩ ← modifyGet fun s =>
+    (s.toParserData, {s with toParserData := {}})
   for (k, _) in cat.kinds do
     let pName := stripPrefix `Lean.Parser k
     let pId := mkIdentFrom ref pName
     if (← checkOrMarkVisited pName) then
+      let some data := (← get).dataMap.find? pName
+        | throwError "missing data for parser '{pName}'"
+      modify fun s => {s with toParserData := s.toParserData.union data}
       leadingPs := leadingPs.push pId
       continue
     let name ← resolveGlobalConstNoOverload (mkIdentFrom ref k)
@@ -470,7 +552,7 @@ partial def compileParserCategory (catName : Name) : CompileM PUnit := do
       leadingPs := leadingPs.push pId
       pushAliasDef pName alias
     else
-      let (trailing, p) ← compileParserConst name
+      let (trailing, p) ← collectParserDataFor pName <| compileParserConst name
       if trailing then
         trailingPs := trailingPs.push pId
       else
@@ -482,24 +564,25 @@ partial def compileParserCategory (catName : Name) : CompileM PUnit := do
       #[$[($trailingPs : LParse Syntax)],*]
   )
   pushDef catName value
-  (← get).cats.forM compileParserCategory
+  modify fun s => {s with dataMap := s.dataMap.insert catName s.toParserData}
+  (← get).cats.erase catName |>.forM compileParserCategory
   modify fun s => {s with
-    kws := s.kws.union <| prevKws
-    kwsMap := s.kwsMap.insert catName s.kws
-    cats := s.cats.union <| prevCats.insert catName
-    catsMap := s.catsMap.insert catName s.cats
+    kws := prevKws.union s.kws
+    syms := prevSyms.union s.syms
+    cats := prevCats.union s.cats |>.insert catName
+    dataMap := s.dataMap.insert catName s.toParserData
   }
 
 def compileParserInfoTopLevel (info : ConstantInfo) : CompileM Unit := do
+  withStepTrace info.name (collapsed := true) do
   let (_, p) ← compileParserInfo info
   let pName := stripPrefix `Lean.Parser info.name
   unless (← checkOrMarkVisited pName) do
     pushDef pName p
   (← get).cats.forM compileParserCategory
   let s ← get
-  pushCategoriesDef .anonymous s.cats
-  pushKeywordsDef .anonymous s.kws
-  pushCategoriesDefs
+  pushParserDataDefs .anonymous s.toParserData
+  pushCategoriesDataDefs
 
 end
 
@@ -521,7 +604,7 @@ elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident) => do
   let catName := cat.getId
   let catDef := Lean.mkConst (``Parser.Category ++ catName)
   discard <| liftTermElabM <| addTermInfo cat catDef
-  let defs ← compileParserCategory catName *> pushCategoriesDefs |>.run
+  let defs ← compileParserCategory catName *> pushCategoriesDataDefs |>.run
   let cmd : Command := ⟨mkNullNode defs⟩
   trace[Partax.compile.result] ← traceDefs defs
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd

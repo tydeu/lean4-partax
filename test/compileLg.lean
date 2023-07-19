@@ -36,3 +36,12 @@ open LCompile
 #match_stx tactic tactic | exact _
 
 #match_stx command command | opaque foo : Nat
+
+#match_stx command command |
+  theorem add_comm : ∀ (n m : Nat), n + m = m + n
+  | n, 0   => Eq.symm (Nat.zero_add n)
+  | n, m+1 => by
+    have : succ (n + m) = succ (m + n) := by
+      apply congrArg; apply Nat.add_comm
+    rw [succ_add m n]
+    apply this

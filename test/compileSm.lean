@@ -4,6 +4,7 @@ Released under the MIT license.
 Authors: Mac Malone
 -/
 import Partax.Test
+import Partax.Compile
 
 open Partax Test Lean Parser
 
@@ -16,7 +17,7 @@ set_option trace.Partax.compile true
 /-
 Simple example of a symbol (an atom) wrapped in a node
 -/
-syntax ex1 := "foo"
+syntax ex1 := " foo "
 #print ex1
 compile_parser ex1
 #print ex1.lParse.ex1
@@ -60,9 +61,9 @@ compile_parser ex2
 /-
 Example of whitespace sensitive parsers
 -/
-syntax exWs := num ws ident
+syntax exWs := atomic(num ws ident)
 syntax exNoWs := atomic(num noWs ident)
-syntax exWsOrNoWs := exNoWs <|> exWs
+syntax exWsOrNoWs := exWs <|> exNoWs
 compile_parser exWsOrNoWs
 #match_stx exWsOrNoWs exWsOrNoWs.lParse | 50ws
 #match_stx exWsOrNoWs exWsOrNoWs.lParse | 50 ws
@@ -81,10 +82,12 @@ def decimal : ParserDescr := .const `decimal
 syntax exSepDigit := "[" decimal,* "]"
 #print exSepDigit
 compile_parser exSepDigit
-#print exSepDigit.lParse
-#eval exSepDigit.lParse.run "[]"
-#eval exSepDigit.lParse.run "[0,] "
-#eval exSepDigit.lParse.run " [0, 1]"
+#print exSepDigit.lParse.exSepDigit
+def parseExSepDigit (str : String) :=
+  exSepDigit.lParse.run (syms := exSepDigit.lParse.symbols) str
+#eval parseExSepDigit "[]"
+#eval parseExSepDigit "[0,] "
+#eval parseExSepDigit " [0, 1]"
 
 /-
 Demonstration of compiling builtin Lean syntax
@@ -131,6 +134,5 @@ end ex
 Dry run compile of the whole Lean grammar
 -/
 namespace ex'
-set_option trace.Partax.compile.result true in
 compile_parser_category (dry) command
 end ex'

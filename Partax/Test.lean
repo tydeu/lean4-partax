@@ -3,7 +3,6 @@ Copyright (c) 2023 Mac Malone. All rights reserved.
 Released under the MIT license.
 Authors: Mac Malone
 -/
-import Partax
 import Lean.Parser
 
 open Lean
@@ -30,7 +29,8 @@ open Syntax in
 partial def quoteSyntax : Syntax → Term
 | .missing => mkCIdent ``missing
 | .atom _ val => mkCApp ``mkAtom #[quote val]
-| .ident _ _ val _  => mkCApp ``mkIdent #[quote val]
+| .ident _ rawVal val _  =>
+  mkCApp ``Parser.mkIdent #[mkCIdent ``SourceInfo.none, quote rawVal, quote val]
 | .node _ kind args =>
     let args := Unhygienic.run `(#[$(args.map quoteSyntax),*])
     mkCApp ``mkNode #[quote kind, args]
@@ -43,15 +43,16 @@ def matchStxFn (pstx : Syntax) (stx : Syntax) : Except String Syntax := do
   return (← Macro.resolveGlobalName name).filter (·.2.isEmpty) |>.isEmpty
 
 @[macro matchStx] def expandMatchStx : Macro := fun matchStx => do
-  let p : Ident := ⟨matchStx[2]⟩; let stx := matchStx[4]
+  let stx := matchStx[4]
   let some src := stx.updateTrailing "".toSubstring |>.reprint
     | Macro.throwError "cannot reprint syntax"
+  let p : Ident := ⟨matchStx[2]⟩
   let kwsName := p.getId ++ `keywords
-  let catsName := p.getId ++ `categories
   let test ← `((matchStxFn · $(quoteSyntax stx)))
-  if (← Macro.undefinedGlobalName catsName) then
+  if (← Macro.undefinedGlobalName kwsName) then
     `(#eval $(p).run $(quote src) >>= $test)
   else
     let kws := mkIdentFrom p kwsName
-    let cats := mkIdentFrom p catsName
-    `(#eval $(p).run $(quote src) (cats := $cats) (kws := $kws) >>= $test)
+    let syms := mkIdentFrom p <| p.getId ++ `symbols
+    let cats := mkIdentFrom p <| p.getId ++ `categories
+    `(#eval $(p).run $(quote src) (cats := $cats) (kws := $kws) (syms := $syms) >>= $test)

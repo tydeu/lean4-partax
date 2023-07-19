@@ -26,14 +26,22 @@ opaque OpaqueLParse.nonemptyType (α : Type u) : NonemptyType.{0}
 def OpaqueLParse (α : Type α) : Type := OpaqueLParse.nonemptyType α |>.type
 instance : Nonempty (OpaqueLParse α) :=  OpaqueLParse.nonemptyType α |>.property
 
+abbrev SymbolTrie := Lean.Parser.Trie String
+@[inline] def SymbolTrie.empty : SymbolTrie := {}
+@[inline] def SymbolTrie.ofList (syms : List String) : SymbolTrie :=
+  syms.foldl (init := {}) fun t s => t.insert s s
+
 abbrev CategoryMap := NameMap (OpaqueLParse Syntax)
 @[inline] def CategoryMap.empty : CategoryMap := {}
+@[inline] def CategoryMap.ofList (xs : List (Name × OpaqueLParse Syntax)) : CategoryMap :=
+  xs.foldl (init := {}) fun m (k, v) => m.insert k v
 
 structure LParseContext extends InputContext where
   prec : Nat := 0
   savedPos? : Option String.Pos := none
   cats : CategoryMap := {}
   kws : NameSet := {}
+  syms : SymbolTrie
 
 structure LParseState where
   lhsPrec : Nat := 0
@@ -70,8 +78,21 @@ instance : MonadBacktrack LParseState LParse where
 instance : ThrowUnexpected LParse where
   throwUnexpected unexpected expected := throw {unexpected, expected}
 
-@[inline] def mergeOrElse (p1 : LParse α) (p2 : Unit → LParse α) : LParse α :=
-  try p1 catch e1 => try p2 () catch e2 => throw <| e1.merge e2
+@[inline] def mergeOrElse (p1 : LParse α) (p2 : Unit → LParse α) : LParse α := do
+  let s0 ← saveState
+  try
+    p1
+  catch e1 =>
+    let t1 := (← getInputPos).byteIdx
+    let s1 ← saveState; restoreState s0
+    try
+      p2 ()
+    catch e2 =>
+      let t2 := (← getInputPos).byteIdx
+      match compare t1 t2 with
+      | .lt => throw e2
+      | .eq => restoreState s1; throw <| e1.merge e2
+      | .gt => restoreState s1; throw e1
 
 instance : MonadOrElse LParse := ⟨mergeOrElse⟩
 
@@ -112,9 +133,9 @@ def skipIgnoredToken : LParse Unit := atomic do
 
 open Parser in
 nonrec def run (input : String) (p : LParse α) (fileName := "<string>")
-(rbp := 0) (cats : CategoryMap := {}) (kws : NameSet := {}) : Except String α :=
+(rbp := 0) (cats : CategoryMap := {}) (kws : NameSet := {}) (syms : SymbolTrie := {}) : Except String α :=
   let ictx := mkInputContext input fileName
-  let ctx := {toInputContext := ictx, prec := rbp, cats, kws}
+  let ctx := {toInputContext := ictx, prec := rbp, cats, kws, syms}
   match (consumeIgnored *> p <* checkEOI).run ctx |>.run {} with
   | .ok a _ => .ok a
   | .error e s =>
@@ -226,6 +247,10 @@ def withSourceInfo (p : LParse α) : LParse (SourceInfo × α) := do
   let info := .original leading start trailing stop
   return (info, a)
 
+def extractSourceInfo (p : LParse α) : LParse SourceInfo := do
+  let (info, _) ← inline <| withSourceInfo p
+  return info
+
 def identAtom : LParse String := do
   if (← attempt <| satisfy isIdBeginEscape) then
     extract do
@@ -256,8 +281,9 @@ def ident : LParse Ident := do
   let (info, val) ← atomic <| withSourceInfo <| extract p
   return .atom info val
 
-@[inline] def atom (val : String) : LParse Syntax :=
-  atomOf (skipString val)
+@[inline] def atom (val : String) : LParse Syntax := do
+  let info ← atomic <| extractSourceInfo <| skipString val
+  return .atom info val
 
 def rawCh (c : Char) (trailingWs := false) : LParse Syntax := do
   let input ← getInput
@@ -271,8 +297,24 @@ def rawCh (c : Char) (trailingWs := false) : LParse Syntax := do
   let info := .original leading start trailing stop
   return .atom info c.toString
 
-@[inline] def symbol (sym : String) : LParse Syntax :=
-  atom sym.trim
+@[inline] def keyword (kw : Name) : LParse Syntax := do
+  atomOf do let n ← name; unless n = kw do
+    throwUnexpected "unexpected ident '{n}'" [s!"keyword '{kw}'"]
+
+def symbol (sym : String) : LParse Syntax := do
+  let sym := sym.trim
+  let info ← extractSourceInfo do
+    let (newPos, nextSym?) :=
+      (← read).syms.matchPrefix (← getInput) (← getInputPos)
+    let expected := [s!"'{sym}'"]
+    if let some nextSym := nextSym? then
+      if sym = nextSym then
+        setInputPos newPos
+      else
+        throwUnexpected s!"unexpected '{nextSym}'" expected
+    else
+      throwUnexpected s!"unexpected non-symbol syntax" expected
+  return .atom info sym
 
 @[inline] def nonReservedSymbol (sym : String) (_includeIdent := false) : LParse Syntax :=
   atom sym.trim
@@ -281,7 +323,8 @@ def unicodeSymbol (sym asciiSym : String) : LParse Syntax :=
   atomOf (skipString sym.trim <|> skipString asciiSym.trim)
 
 @[inline] def node (kind : SyntaxNodeKind) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
-  return ⟨.node .none kind (← p)⟩
+  let args ← try p catch e => throw {e with unexpected := s!"{kind}: {e.unexpected}"}
+  return ⟨.node .none kind args⟩
 
 @[inline] def leadingNode (kind : SyntaxNodeKind) (prec : Nat) (p : LParse (Array Syntax)) : LParse (TSyntax kind) := do
   checkPrec prec; let n ← node kind p; setLhsPrec prec; return n
@@ -391,44 +434,40 @@ def nameLit : LParse NameLit :=
   node nameLitKind <| Array.singleton <$> atomOf do
     skipChar '`'; discard name
 
-def optional (p : LParse (Array Syntax)) : LParse Syntax :=
+@[inline] def optional (p : LParse (Array Syntax)) : LParse Syntax :=
   attemptD mkNullNode <| @mkNullNode <$> p
 
-def many (p : LParse Syntax) : LParse Syntax :=
+@[inline] def many (p : LParse Syntax) : LParse Syntax :=
   @mkNullNode <$> collectMany p
 
-def many1 (p : LParse Syntax) : LParse Syntax :=
+@[inline] def many1 (p : LParse Syntax) : LParse Syntax :=
   @mkNullNode <$> collectMany1 p
 
 def many1Unbox (p : LParse Syntax) : LParse Syntax :=
   collectMany1 p <&> fun xs =>
     if _ : xs.size = 1 then xs[0]'(by simp [*]) else mkNullNode xs
 
-def sepByTrailing (initArgs : Array Syntax)
+partial def sepByTrailing (args : Array Syntax)
 (p : LParse Syntax) (sep : LParse Syntax) : LParse Syntax := do
-  let mut args := initArgs
-  repeat if let some a ← attempt? p then
-    args := args.push a
+  if let some a ← attempt? p then
+    let args := args.push a
     if let some s ← attempt? sep then
-      args := args.push s
+      sepByTrailing (args.push s) p sep
     else
-      break
-  return mkNullNode args
+      return mkNullNode args
+  else
+    return mkNullNode args
 
-def sepBy1NoTrailing (initArgs : Array Syntax)
+partial def sepBy1NoTrailing (args : Array Syntax)
 (p : LParse Syntax) (sep : LParse Syntax) : LParse Syntax := do
-  let mut args := initArgs
-  repeat
-    let a ← p
-    args := args.push a
-    if let some s ← attempt? sep then
-      args := args.push s
-    else
-      break
-  return mkNullNode args
+  let args := args.push (← p)
+  if let some s ← attempt? sep then
+    sepBy1NoTrailing (args.push s) p sep
+  else
+    return mkNullNode args
 
 def sepBy (p : LParse Syntax)
-(sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep : Bool) : LParse Syntax := do
+(sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep := false) : LParse Syntax := do
   if allowTrailingSep then
     sepByTrailing #[] p psep
   else if let some a ← attempt? p then
@@ -440,10 +479,10 @@ def sepBy (p : LParse Syntax)
     return mkNullNode
 
 def sepBy1 (p : LParse Syntax)
-(sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep : Bool) : LParse Syntax := do
-  let a ← p
-  if let some s ← attempt? psep then
-    if allowTrailingSep then
+(sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep := false) : LParse Syntax := do
+  if allowTrailingSep then
+    let a ← p
+    if let some s ← attempt? psep then
       sepByTrailing #[a, s] p psep
     else
       return mkNullNode #[a]
@@ -453,11 +492,11 @@ def sepBy1 (p : LParse Syntax)
 @[inline] def pushNone : LParse Syntax :=
   pure mkNullNode
 
-@[inline] def sepByIndent (p : LParse Syntax)
+def sepByIndent (p : LParse Syntax)
 (sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep := false) : LParse Syntax :=
   withPosition <| sepBy (checkColGe *> p) sep (psep <|> checkColEq *> checkLinebreakBefore *> pushNone) allowTrailingSep
 
-@[inline] def sepBy1Indent (p : LParse Syntax)
+def sepBy1Indent (p : LParse Syntax)
 (sep : String) (psep : LParse Syntax := symbol sep) (allowTrailingSep := false) : LParse Syntax :=
   withPosition <| sepBy1 (checkColGe *> p) sep (psep <|> checkColEq *> checkLinebreakBefore *> pushNone) allowTrailingSep
 
