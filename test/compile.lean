@@ -76,12 +76,17 @@ compile_parser exP
 #match_stx exP exP.lParse | /-- hello /- hello -/ -/
 
 /-
-Example of using our own builtin aliases (i.e., `decimal`)
+Example of using our own builtin aliases
 -/
+def LParse.decimal : LParse Syntax :=
+  LParse.atomOf do skipMany digit
 def decimal : ParserDescr := .const `decimal
 syntax exSepDigit := "[" decimal,* "]"
 #print exSepDigit
-compile_parser exSepDigit
+compile_parser exSepDigit {CompileConfig.lparse with
+  syntaxAliases := CompileConfig.lparse.syntaxAliases
+    |>.insert `decimal ``LParse.decimal
+}
 #print exSepDigit.lParse.exSepDigit
 def parseExSepDigit (str : String) :=
   exSepDigit.lParse.run (syms := exSepDigit.lParse.symbols) str
