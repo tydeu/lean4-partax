@@ -12,10 +12,9 @@ Tests of the whole compiled Lean grammar.
 
 open Partax Test LCompile
 
+#match_stx term term | a.1
 #match_stx term term | true
-
 #match_stx term term | id a
-
 #match_stx term term | 2 + 2 = 4
 
 #match_stx doElem doElem | return ()

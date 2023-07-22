@@ -81,7 +81,7 @@ where
     let s := if let some sym := sym? then s.insert sym else s
     map.fold (init := s) fun s _ t => go s t
 
-@[inline] def CategoryMap.toSet (map : CategoryMap) : NameSet :=
+@[inline] def ParserMap.toSet (map : ParserMap) : NameSet :=
   map.fold (init := {}) fun s k _ => s.insert k
 
 section
@@ -170,7 +170,7 @@ def pushSymbolsDef (ns : Name) (syms : SymbolSet)  : CompileM PUnit := do
 def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
   let xs ← cats.foldM (init := #[]) fun a n =>
     return a.push <| ← ``(($(quote n), $(mkIdent n)))
-  let catMap ← ``(CategoryMap.ofList [$xs,*])
+  let catMap ← ``(ParserMap.ofList [$xs,*])
   pushDef (ns.str "categories") catMap
 
 @[inline] def pushParserDataDefs
@@ -303,7 +303,7 @@ def compileCategoryDef (catName : Name) (leading trailing : Array Name) : Compil
   let value ← ``(
     LParse.category $(quote catName)
       #[$[($leading : LParse Syntax)],*]
-      #[$[($trailing : LParse Syntax)],*]
+      #[$[($trailing : LParse (SyntaxNodeKind × Array Syntax))],*]
   )
   pushDef catName value
   modify fun s => {s with compileMap := s.compileMap.insert catName catName}
@@ -550,8 +550,8 @@ def extractParserDataOf (name const : Name) : CompileM PUnit := do
     | throwError "parser '{const}' is missing a 'keywords : NameSet' definition"
   let .ok syms := evalConstCheck SymbolTrie (← getEnv) (← getOptions) ``SymbolTrie (const.str "symbols")
     | throwError "parser '{const}' is missing a 'symbols : SymbolTrie' definition"
-  let .ok cats := evalConstCheck CategoryMap (← getEnv) (← getOptions) ``CategoryMap (const.str "categories")
-    | throwError "parser '{const}' is missing a 'categories : CategoryMap' definition"
+  let .ok cats := evalConstCheck ParserMap (← getEnv) (← getOptions) ``ParserMap (const.str "categories")
+    | throwError "parser '{const}' is missing a 'categories : ParserMap' definition"
   let data : ParserData := {kws, syms := syms.toSet, cats := cats.toSet}
   modify fun s => {s with
     toParserData := s.toParserData.union data

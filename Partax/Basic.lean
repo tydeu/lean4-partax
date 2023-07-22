@@ -59,6 +59,10 @@ instance [MonadExcept ε m] : MonadOrElse m where
 instance [Alternative m] : MonadOrElse m where
   orElse := Alternative.orElse
 
+open Lean (MonadBacktrack saveState restoreState)
+@[inline] def saveAndRestoreState [Monad m] [MonadBacktrack σ m] (r : σ) : m σ := do
+  let s ← saveState; restoreState r; return s
+
 --------------------------------------------------------------------------------
 /-! ## Primitives                                                             -/
 --------------------------------------------------------------------------------
@@ -93,17 +97,38 @@ variable [ThrowUnexpected m]
 @[inline] def checkNotEOI (expected : List String := []) : m PUnit := do
   if (← getIsEOI) then throwUnexpectedEOI expected
 
+/-- Invoke `f` with a proof if the parser head is not at end-of-input. -/
+@[inline] def skipIfNotEOI
+(f : (input : String) → (pos : String.Pos) → ¬ input.atEnd pos → m PUnit) : m PUnit := do
+  let input ← getInput
+  let inputPos ← getInputPos
+  if h : ¬ input.atEnd inputPos then
+    f input inputPos h
+
+/-- Invoke `f` with a proof that the parser head is not at end-of-input. -/
+@[inline] def withNotEOI
+(f : (input : String) → (pos : String.Pos) → ¬ input.atEnd pos → m α)
+(expected : List String := [])  : m α := do
+  let input ← getInput
+  let inputPos ← getInputPos
+  if h : input.atEnd inputPos then
+    throwUnexpectedEOI expected
+  else
+    f input inputPos h
+
 /-- Get the character at the parser head. Throws on end-of-input.  -/
 @[inline] def peek1 (expected : List String := [])  : m Char := do
-  checkNotEOI expected; peek
+  withNotEOI (fun input pos h => return input.get' pos h) expected
 
 /-- Advance the parser one character. Throws on end-of-input.  -/
 @[inline] def skip1 (expected : List String := [])  : m PUnit := do
-  checkNotEOI expected; skip
+  withNotEOI (fun input pos h => setInputPos <| input.next' pos h) expected
 
 /-- Returns the next character in the input. Throws on end-of-input.  -/
 @[inline] def next1 (expected : List String := []) : m Char := do
-  checkNotEOI expected; next
+  withNotEOI (expected := expected) fun input pos h =>  do
+    setInputPos <| input.next' pos h
+    return input.get' pos h
 
 end
 
@@ -205,13 +230,13 @@ variable [MonadCheckpoint m]
 @[inline] def collectMany (p : m α) : m (Array α) :=
   collectManyCore p #[]
 
-@[always_inline, inline] def collectMany1 (p : m α) : m (Array α) := do
+@[inline] def collectMany1 (p : m α) : m (Array α) := do
   let a ← p; collectManyCore p #[a]
 
 @[inline] partial def skipMany (p : m α) : m PUnit := do
-  if (← attempt p) then skipMany p else pure ()
+  if (← attempt p) then skipMany p
 
-@[always_inline, inline] def skipMany1 (p : m α) : m PUnit :=
+@[inline] def skipMany1 (p : m α) : m PUnit :=
   p *> skipMany p
 
 end
@@ -227,26 +252,34 @@ variable [Monad m] [MonadInput m] [ThrowUnexpected m]
 @[inline] def skipString (str : String) : m PUnit := do
   let input ← getInput
   let substr := Substring.mk input (← getInputPos) input.endPos |>.take str.length
-  if substr == str.toSubstring then
-    setInputPos substr.stopPos
-  else
+  setInputPos substr.stopPos
+  unless substr == str.toSubstring do
     throwUnexpected s!"unexpected '{substr}'" [s!"'{str}'"]
 
 /-- Take the head character if its satisfies `p`. Otherwise, throw an error. -/
-@[always_inline, inline] def satisfy (p : Char → Bool) (expected : List String := []) : m Char := do
+@[inline] def satisfy (p : Char → Bool) (expected : List String := []) : m Char := do
   let c ← next1 expected; if p c then return c else throwUnexpected s!"unexpected '{c}'" expected
 
 /-- Consume the head character if its satisfies `p`. Otherwise, throw an error. -/
-@[always_inline, inline] def skipSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit :=
+@[inline] def skipSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit :=
   discard <| satisfy p expected
 
 /-- Consume the head character if its satisfies `p`. Otherwise, do nothing. -/
-@[always_inline, inline] def skipIfSatisfy (p : Char → Bool) : m PUnit := do
-  if p (← peek) then skip
+@[inline] def skipIfSatisfy (p : Char → Bool) : m PUnit := do
+  skipIfNotEOI fun input pos h => do
+    if p <| input.get' pos h then
+      setInputPos <| input.next' pos h
+
+/-- Consume the characters until one matches `p`. Does not consume the matched character. -/
+@[specialize] partial def skipToSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
+  withNotEOI (expected := expected) fun input pos h => do
+    unless p <| input.get' pos h do
+      setInputPos <| input.next' pos h
+      skipToSatisfy p
 
 /-- Consume characters until one matches `p`. Consumes the matched character. -/
-@[inline] partial def skipTillSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
-  let c ← next1 expected; if p c then pure () else skipTillSatisfy p
+@[specialize] partial def skipTillSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
+  let c ← next1 expected; unless p c do skipTillSatisfy p
 
 /-- Skip over a character `c` in the input. -/
 @[inline] def skipChar (c : Char) : m PUnit :=
@@ -287,50 +320,48 @@ end
 /-! ## Longest Match                                                          -/
 --------------------------------------------------------------------------------
 
-open Lean (MonadBacktrack saveState restoreState)
-
 /--
 Tries all parsers in `ps`, searching for the last longest match.
 If the last longest match succeeded, restore its state and return its result.
 Otherwise, merge the errors of all failing longest match parsers into one error
 and throw it, restoring the state of the last erroring longest match parser.
 -/
-@[specialize] def longestMatch
-[Monad m] [MonadInput m] [MonadExcept ε m] [MonadCheckpoint m] [MonadBacktrack σ m]
-(ps : Array (m α)) (h : ps.size > 0) (mergeErrors : ε → ε → ε) : m α :=
-  let rec @[specialize] loop (prev : EStateM.Result ε σ α) (prevTail) (i) :=
-    if _ : i < ps.size then
-      checkpoint fun restore => do
+@[inline] def longestMatch
+[Monad m] [MonadInput m] [MonadExcept ε m] [MonadBacktrack σ m]
+(ps : Array (m α)) (h : ps.size > 0) (mergeErrors : ε → ε → ε) : m α := do
+  let s0 ← saveState
+  let rec @[specialize] loop (res : EStateM.Result ε σ α) (oldTail) (i) := do
+    if h : i < ps.size then
+      restoreState s0
       match (← observing ps[i]) with
       | .ok a =>
         let newTail := (← getInputPos).byteIdx
-        if prevTail ≤ newTail then
-          let s ← saveState; restore
+        if oldTail ≤ newTail then
+          let s ← saveState
           loop (.ok a s) newTail (i+1)
         else
-          restore; loop prev prevTail (i+1)
+          loop res oldTail (i+1)
       | .error e2 =>
         let newTail := (← getInputPos).byteIdx
-        if prevTail ≤ newTail then
-          match prev with
-          | .ok .. => restore; loop prev prevTail (i+1)
+        if oldTail ≤ newTail then
+          match res with
+          | .ok .. => loop res oldTail (i+1)
           | .error e1 _ =>
-            let s2 ← saveState; restore
-            if prevTail = newTail then
+            let s2 ← saveState
+            if oldTail = newTail then
               loop (.error (mergeErrors e1 e2) s2) newTail (i+1)
             else
               loop (.error e2 s2) newTail (i+1)
         else
-          restore; loop prev prevTail (i+1)
+          loop res oldTail (i+1)
     else
-      match prev with
+      match res with
       | .ok a s => restoreState s *> pure a
       | .error e s => restoreState s *> throw e
-  checkpoint fun restore => do
   let x ← observing ps[0]
   let tail := (← getInputPos).byteIdx
-  let s ← saveState; restore
+  let s ← saveState
   match x with
   | .ok a => loop (.ok a s) tail 1
   | .error e => loop (.error e s) tail 1
-termination_by loop prev tail i => ps.size - i
+termination_by loop _ _ i => ps.size - i
