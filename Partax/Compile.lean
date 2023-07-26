@@ -70,20 +70,6 @@ def resolveGlobalNameNoOverload? [Monad m] [MonadResolveName m] [MonadEnv m] (na
 @[inline] def KeywordSet.ofList (kws : List Name) : NameSet :=
   kws.foldl (init := {}) fun s kw => s.insert kw
 
-abbrev SymbolSet := RBTree String compare
-@[inline] def SymbolSet.empty : SymbolSet := {}
-
-@[inline] partial def SymbolTrie.toSet (trie : SymbolTrie) : SymbolSet :=
-  go {} trie
-where
-  go s
-  | .Node sym? map =>
-    let s := if let some sym := sym? then s.insert sym else s
-    map.fold (init := s) fun s _ t => go s t
-
-@[inline] def ParserMap.toSet (map : ParserMap) : NameSet :=
-  map.fold (init := {}) fun s k _ => s.insert k
-
 section
 open Elab.Command (CommandElabM)
 
@@ -203,6 +189,8 @@ abbrev AppHandler (α) :=
   Name → Array Expr → (Expr → CompileM α) → CompileM α
 
 structure CompileConfig where
+  /-- Default namespace for `compile_parser -/
+  defaultNs : Name
   /-- Original parser to compiled parser name mapping. -/
   mapName : Name → Name
   /-- Constant-to-constant overrides for constants referenced in `ParserDescr`. -/
@@ -233,6 +221,10 @@ def compileArg1 : AppHandler α := fun _ args compileExpr =>
 /-- A parser app handler that produces a `LParse.unsupported`. -/
 def compileUnsupported : AppHandler Term := fun name _ _ =>
   return Syntax.mkApp (mkCIdentFrom (← getRef) ``LParse.unsupported) #[quote name]
+
+/-- A parser app handler that produces a `LParse.nop`. -/
+def compileNop : AppHandler Term := fun _  _ _ =>
+  return mkCIdentFrom (← getRef) ``LParse.nop
 
 /-- Compile a `>>` `Expr` into a `>>` `Term`. -/
 def compileHAndThen : AppHandler Term := fun _ args compileExpr => do
@@ -281,6 +273,16 @@ def compileSymbol : AppHandler Term := fun _ args _ => do
     addKeyword kw
     ``(LParse.keyword $(quote kw))
 
+/-- Compile a static keyowrd `withForbidden` into a `LParse.withForbiddenKeyword`. -/
+def compileWithForbidden  : AppHandler Term := fun _ args compileExpr => do
+  let sym ← liftTermElabM do
+    evalExpr String (mkConst ``String) args[0]!
+  let kw := sym.trim.toName
+  if kw.isAnonymous then
+    throwError "compiling a non-keyword 'withForbidden' call is unsupported"
+  else
+    ``(LParse.withForbiddenKeyword $(quote kw) $(← compileExpr args[1]!))
+
 /-- Compile a static `categoryParser` into a `LParse.categoryRef`, noting the category's use. -/
 def compileCategoryParser : AppHandler Term := fun _ args compileExpr => do
   let catName ← liftTermElabM do
@@ -310,6 +312,7 @@ def compileCategoryDef (catName : Name) (leading trailing : Array Name) : Compil
 
 /-- The standard compilation configuration for produce `LParse`-based definitions. -/
 def CompileConfig.lparse : CompileConfig where
+  defaultNs := "lParse"
   mapName name :=
     stripPrefix `Lean.Parser name
   syntaxAliases :=
@@ -348,6 +351,7 @@ def CompileConfig.lparse : CompileConfig where
     |>.insert ``Parser.sepBy1 ``LParse.sepBy1
     |>.insert ``Parser.sepByIndent ``LParse.sepByIndent
     |>.insert ``Parser.sepBy1Indent ``LParse.sepBy1Indent
+    |>.insert ``Parser.withoutForbidden ``LParse.withoutForbidden
     |>.insert ``Parser.checkPrec ``LParse.checkPrec
     |>.insert ``Parser.checkLhsPrec ``LParse.checkLhsPrec
     |>.insert ``Parser.checkWsBefore ``LParse.checkWsBefore
@@ -374,6 +378,12 @@ def CompileConfig.lparse : CompileConfig where
     -- Parsers
     |>.insert ``Parser.symbol compileSymbol
     |>.insert ``Parser.categoryParser compileCategoryParser
+    |>.insert ``Parser.andthen compileParserAndThen
+    |>.insert ``Parser.withForbidden compileWithForbidden
+    |>.insert ``HAndThen.hAndThen compileHAndThen
+    |>.insert ``Parser.orelse compileParserOrElse
+    |>.insert ``HOrElse.hOrElse compileHOrElse
+    -- No-op Parsers
     |>.insert ``Parser.ppIndent compileArg0
     |>.insert ``Parser.ppDedent compileArg0
     |>.insert ``Parser.ppRealFill compileArg0
@@ -389,14 +399,8 @@ def CompileConfig.lparse : CompileConfig where
     |>.insert ``Parser.withAntiquotSpliceAndSuffix compileArg1
     |>.insert ``Parser.withOpen compileArg0
     |>.insert ``Parser.withOpenDecl compileArg0
-    |>.insert ``Parser.withForbidden compileArg1
-    |>.insert ``Parser.withoutForbidden compileArg0
-    |>.insert ``Parser.andthen compileParserAndThen
-    |>.insert ``HAndThen.hAndThen compileHAndThen
-    |>.insert ``Parser.orelse compileParserOrElse
-    |>.insert ``HOrElse.hOrElse compileHOrElse
     |>.insert ``Parser.parserOfStack compileUnsupported
-    |>.insert ``Parser.checkStackTop compileUnsupported
+    |>.insert ``Parser.checkStackTop compileNop
 
 end
 
@@ -448,11 +452,11 @@ where
       let .const fname _ := fn
         | return mkApp (← compileExpr fn) (← args.mapM compileExpr)
       if (``Name).isPrefixOf fname then liftTermElabM do
-        return quote <| ← evalExpr Name (mkConst ``Name)  x
-      else if let some handler := cfg.parserAppHandlers.find? fname then
-        handler fname args compileExpr
+        return quote <| ← evalExpr Name (mkConst ``Name) x
       else if let some alias := cfg.parserAliases.find? fname then
         return mkApp (mkCIdentFrom (← getRef) alias) (← args.mapM compileExpr)
+      else if let some handler := cfg.parserAppHandlers.find? fname then
+        handler fname args compileExpr
       else
         let some info := (← getEnv).find? fname
           | return mkApp (← compileExpr fn) (← args.mapM compileExpr)
@@ -628,8 +632,8 @@ def evalOptConfig (cfg? : Option Term) : TermElabM CompileConfig :=
   | some cfg => evalTerm CompileConfig (mkConst ``CompileConfig) cfg
   | none => return CompileConfig.lparse
 
-scoped syntax "compile_parser_category " (dry)? ident (term)? : command
-elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident $(cfg?)?) => do
+scoped syntax "compile_parser_category " (dry)? ident (" with " term)? : command
+elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident $[with $cfg?]?) => do
   let catName := cat.getId
   let catDef := Lean.mkConst (``Parser.Category ++ catName)
   discard <| liftTermElabM <| addTermInfo cat catDef
@@ -639,8 +643,8 @@ elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident $(cfg?)?) 
   trace[Partax.compile.result] ← traceDefs defs
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd
 
-scoped syntax "compile_parser " (dry)? ident (" as " ident)? (term)? : command
-elab_rules : command | `(compile_parser $[$dry?]? $id $[as $root?]? $(cfg?)?) => do
+scoped syntax "compile_parser " (dry)? ident (" in " ident)? (" with " term)? : command
+elab_rules : command | `(compile_parser $[$dry?]? $id $[in $ns?]? $[with $cfg?]?) => do
   let name ← resolveGlobalConstNoOverload id
   let some info := (← getEnv).find? name
     | throwErrorAt id s!"unknown constant '{name}'"
@@ -649,10 +653,13 @@ elab_rules : command | `(compile_parser $[$dry?]? $id $[as $root?]? $(cfg?)?) =>
   let defs ← compileParserInfoTopLevel cfg info |>.run
   let cmd : Command := ⟨mkNullNode defs⟩
   trace[Partax.compile.result] ← traceDefs defs
-  let ns : Name := root?.getD id |>.getId.str "lParse"
-  let root := root?.getD ns
-  let pName := cfg.mapName name
-  let cmd ← `(namespace $ns $cmd end $ns abbrev $root := $(ns ++ pName))
+  let cmd ← do
+    if let some ns := ns? then
+      `(namespace $ns $cmd end $ns)
+    else
+      let pName := cfg.mapName name
+      let root := id.getId ++ cfg.defaultNs
+      `(namespace $root $cmd end $root abbrev $root := $(root ++ pName))
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd
 
 end

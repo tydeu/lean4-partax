@@ -10,7 +10,12 @@ Test helper which compiles the entire Lean grammar.
 -/
 
 open scoped Lean
-namespace Partax.Test.LCompile
 
-set_option trace.Partax.compile.result true in
+set_option trace.Partax.compile.result true
+
+namespace Partax.Test.LCompile
 compile_parser_category command
+end Partax.Test.LCompile
+
+open scoped Partax
+compile_parser Lean.Parser.Module.header in Partax.Test.LCompile

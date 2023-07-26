@@ -31,25 +31,47 @@ abbrev SymbolTrie := Lean.Parser.Trie String
 @[inline] def SymbolTrie.ofList (syms : List String) : SymbolTrie :=
   syms.foldl (init := {}) fun t s => t.insert s s
 
+abbrev SymbolSet := RBTree String compare
+@[inline] def SymbolSet.empty : SymbolSet := {}
+@[inline] partial def SymbolTrie.toSet (trie : SymbolTrie) : SymbolSet :=
+  go {} trie
+where
+  go s
+  | .Node sym? map =>
+    let s := if let some sym := sym? then s.insert sym else s
+    map.fold (init := s) fun s _ t => go s t
+
 abbrev ParserMap := NameMap (OpaqueLParse Syntax)
 @[inline] def ParserMap.empty : ParserMap := {}
 @[inline] def ParserMap.ofList (xs : List (Name × OpaqueLParse Syntax)) : ParserMap :=
   xs.foldl (init := {}) fun m (k, v) => m.insert k v
+@[inline] def ParserMap.toSet (map : ParserMap) : NameSet :=
+  map.fold (init := {}) fun s k _ => s.insert k
 
 structure LParseContext extends InputContext where
   prec : Nat := 0
   savedPos? : Option String.Pos := none
   cats : ParserMap := {}
   kws : NameSet := {}
-  syms : SymbolTrie
+  forbiddenKw : Name := .anonymous
+  syms : SymbolTrie := {}
 
 structure LParseState where
   lhsPrec : Nat := 0
   inputPos : String.Pos := 0
   ignoredBefore : Substring := "".toSubstring
 
+/-- Parser monadic transformer for Lean-style parsing. -/
+abbrev LParseT (m) := ReaderT LParseContext <| ExceptT Error <| StateT LParseState m
+
 /-- Combinatorial, monadic parser for Lean-style parsing. -/
 abbrev LParse := ReaderT LParseContext <| EStateM Error LParseState
+
+instance [Pure m] : MonadLift LParse (LParseT m) where
+  monadLift x := fun r s =>
+    match x r s with
+    | .ok a s => pure (.ok a, s)
+    | .error e s => pure (.error e, s)
 
 namespace OpaqueLParse
 unsafe def unsafeMk : LParse α → OpaqueLParse α := unsafeCast
@@ -61,15 +83,74 @@ unsafe def unsafeGet : OpaqueLParse α → LParse α := unsafeCast
 instance : Coe (OpaqueLParse α) (LParse α) := ⟨get⟩
 end OpaqueLParse
 
+class MonadIgnoredBefore (m : Type → Type u) where
+  getIgnoredBefore : m Substring
+  setIgnoredBefore : Substring → m PUnit
+
+export MonadIgnoredBefore (getIgnoredBefore setIgnoredBefore)
+
+instance [MonadLift m n] [MonadIgnoredBefore m] : MonadIgnoredBefore n where
+  getIgnoredBefore := liftM (m := m) getIgnoredBefore
+  setIgnoredBefore i := liftM (m := m) <| setIgnoredBefore i
+
 namespace LParse
+variable [Monad m] [MonadInput m] [ThrowUnexpected m]
+
+@[specialize] partial def skipCommentBody : m Unit := do
+  let rec loop (nesting : Nat) := do
+    match (← next1) with
+    | '-' =>
+      if (← next1) = '/' then
+        if nesting = 0 then
+          return
+        else
+          loop (nesting-1)
+      else
+        loop nesting
+    | '/' =>
+      if (← next1) = '-' then
+        loop (nesting+1)
+      else
+        loop nesting
+    | _ => loop nesting
+  loop 0
+
+variable [MonadCheckpoint m] [MonadExcept ε m]
+
+/-- Skip a single whitespace character or a comment. -/
+@[specialize] def skipIgnoredToken : m Unit := atomic do
+  match (← next1) with
+  | '/' =>
+    skipChar '-'
+    skipSatisfy fun c => c ≠ '-' ∧ c ≠ '!'
+    skipCommentBody
+  | '-' =>
+    skipChar '-'
+    skipTillChar '\n'
+  | c =>
+    unless c.isWhitespace do
+      throwUnexpected s!"unexpected '{c}'" ["whitespace", "comment"]
+
+/-- Consumes whitespace and comments and saves them in the `LParseState`. -/
+@[inline] def consumeIgnored [MonadIgnoredBefore m] : m Substring := do
+  let ignored ← extractSub <| skipMany skipIgnoredToken
+  setIgnoredBefore ignored
+  return ignored
+
+/-- Parse full input. Consumes initial ignored tokens and throws if input remains. -/
+@[inline] def fullInput [MonadIgnoredBefore m] (p : m α) : m α := do
+  consumeIgnored *> p <* checkEOI
+
+end LParse
 
 instance : MonadInput LParse where
-  getInput := return (← read).input
-  getInputPos := return (← get).inputPos
+  getInput := (·.input) <$> read
+  getInputPos := (·.inputPos) <$> get
   setInputPos pos := modify ({· with inputPos := pos})
 
-instance : MonadCheckpoint LParse where
-  checkpoint f := fun c s => let d := s; f (fun _ _ => .ok () d) c s
+instance : MonadIgnoredBefore LParse where
+  getIgnoredBefore := (·.ignoredBefore) <$> get
+  setIgnoredBefore i := modify ({· with ignoredBefore := i})
 
 instance : MonadBacktrack LParseState LParse where
   saveState := fun _ s => .ok s s
@@ -77,6 +158,43 @@ instance : MonadBacktrack LParseState LParse where
 
 instance : ThrowUnexpected LParse where
   throwUnexpected unexpected expected := throw {unexpected, expected}
+
+open Parser in
+nonrec def LParse.run (input : String) (p : LParse α) (fileName := "<string>")
+(rbp := 0) (cats : ParserMap := {}) (kws : NameSet := {}) (syms : SymbolTrie := {}) : Except String α :=
+  let ictx := mkInputContext input fileName
+  let ctx := {toInputContext := ictx, prec := rbp, cats, kws, syms}
+  match (LParse.fullInput p : LParse α).run ctx |>.run {} with
+  | .ok a _ => .ok a
+  | .error e s =>
+    let pos := ctx.fileMap.toPosition s.inputPos
+    .error <| mkErrorStringWithPos ctx.fileName pos (toString e)
+
+instance [Monad m]  : MonadInput (LParseT m) where
+  getInput := (·.input) <$> read
+  getInputPos := (·.inputPos) <$> get
+  setInputPos pos := modify ({· with inputPos := pos})
+
+instance [Monad m] : MonadIgnoredBefore (LParseT m) where
+  getIgnoredBefore := (·.ignoredBefore) <$> get
+  setIgnoredBefore i := modify ({· with ignoredBefore := i})
+
+instance [Pure m] : MonadBacktrack LParseState (LParseT m) where
+  saveState := fun _ s => pure (.ok s, s)
+  restoreState s := fun _ _ => pure (.ok (), s)
+
+open Parser in
+nonrec def LParseT.run [Monad m] (input : String) (p : LParseT m α) (fileName := "<string>")
+(rbp := 0) (cats : ParserMap := {}) (kws : NameSet := {}) (syms : SymbolTrie := {}) : ExceptT String m α := do
+  let ictx := mkInputContext input fileName
+  let ctx := {toInputContext := ictx, prec := rbp, cats, kws, syms}
+  match (← (LParse.fullInput p : LParseT m α).run ctx |>.run.run {}) with
+  | (.ok a, _) => pure a
+  | (.error e, s) =>
+    let pos := ctx.fileMap.toPosition s.inputPos
+    throw <| mkErrorStringWithPos ctx.fileName pos (toString e)
+
+namespace LParse
 
 @[inline] def mergeOrElse (p1 : LParse α) (p2 : Unit → LParse α) : LParse α := do
   let s0 ← saveState
@@ -96,52 +214,6 @@ instance : ThrowUnexpected LParse where
 
 instance : MonadOrElse LParse := ⟨mergeOrElse⟩
 
-partial def skipCommentBody : LParse Unit := do
-  let rec loop (nesting : Nat) := do
-    match (← next1) with
-    | '-' =>
-      if (← next1) = '/' then
-        if nesting = 0 then
-          return
-        else
-          loop (nesting-1)
-    | '/' =>
-      if (← next1) = '-' then
-        loop (nesting+1)
-    | _ => loop nesting
-  loop 0
-
-/-- Skip a single whitespace character or a comments. -/
-def skipIgnoredToken : LParse Unit := atomic do
-  match (← next1) with
-  | '/' =>
-    skipChar '-'
-    skipSatisfy fun c => c ≠ '-' ∧ c ≠ '!'
-    skipCommentBody
-  | '-' =>
-    skipChar '-'
-    skipTillChar '\n'
-  | c =>
-    unless c.isWhitespace do
-      throwUnexpected s!"unexpected '{c}'" ["whitespace", "comment"]
-
-/-- Consumes whitespace and comments and saves them in the `LParseState`. -/
-@[inline] def consumeIgnored : LParse Substring := do
-  let ignored ← extractSub <| skipMany skipIgnoredToken
-  modify ({· with ignoredBefore := ignored})
-  return ignored
-
-open Parser in
-nonrec def run (input : String) (p : LParse α) (fileName := "<string>")
-(rbp := 0) (cats : ParserMap := {}) (kws : NameSet := {}) (syms : SymbolTrie := {}) : Except String α :=
-  let ictx := mkInputContext input fileName
-  let ctx := {toInputContext := ictx, prec := rbp, cats, kws, syms}
-  match (consumeIgnored *> p <* checkEOI).run ctx |>.run {} with
-  | .ok a _ => .ok a
-  | .error e s =>
-    let pos := ctx.fileMap.toPosition s.inputPos
-    .error <| mkErrorStringWithPos ctx.fileName pos (toString e)
-
 /-- A do-nothing parser for aliasing. -/
 @[always_inline, inline] def nop : LParse PUnit := pure ()
 
@@ -160,6 +232,12 @@ protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LPa
 @[inline] def throwUnexpectedPrec : LParse PUnit :=
   throwUnexpected unexpectedPrecMessage
 
+@[inline] def withForbiddenKeyword (kw : Name) (p : LParse α) : LParse α := do
+  withReader ({· with forbiddenKw := kw}) p
+
+@[inline] def withoutForbidden (p : LParse α) : LParse α := do
+  withReader ({· with forbiddenKw := .anonymous}) p
+
 @[inline] def withPrec (prec : Nat) (p : LParse α) : LParse α := do
   withReader ({· with prec}) p
 
@@ -172,16 +250,14 @@ protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LPa
 @[inline] def setLhsPrec (prec : Nat) : LParse PUnit := do
   modify ({· with lhsPrec := prec})
 
-@[inline] def getWsBefore : LParse Substring := (·.ignoredBefore) <$> get
-
 @[inline] def checkWsBefore (errorMsg : String := "space before") : LParse PUnit := do
-  if (← getWsBefore).isEmpty then error errorMsg
+  if (← getIgnoredBefore).isEmpty then error errorMsg
 
 @[inline] def checkNoWsBefore (errorMsg : String := "no space before") : LParse PUnit := do
-  unless (← getWsBefore).isEmpty do error errorMsg
+  unless (← getIgnoredBefore).isEmpty do error errorMsg
 
 @[inline] def checkLinebreakBefore (errorMsg : String := "line break") : LParse PUnit := do
-  unless (← getWsBefore).contains '\n' do error errorMsg
+  unless (← getIgnoredBefore).contains '\n' do error errorMsg
 
 @[inline] def withSavedPos (savedPos? : Option String.Pos) (p : LParse α) : LParse α := do
   withReader ({· with savedPos?}) p
@@ -190,7 +266,7 @@ protected abbrev notFollowedBy (p : LParse α) (msg : String := "element") : LPa
   withSavedPos (← getInputPos) p
 
 @[inline] def withPositionAfterLinebreak (p : LParse α) : LParse α  := do
-  if (← getWsBefore).contains '\n' then withPosition p else p
+  if (← getIgnoredBefore).contains '\n' then withPosition p else p
 
 @[inline] def withoutPosition (p : LParse α) : LParse α := do
   withSavedPos none p
@@ -240,7 +316,7 @@ instance : CoeOut (LParse (TSyntax k)) (LParse Syntax) where
 def withSourceInfo (p : LParse α) : LParse (SourceInfo × α) := do
   let start ← getInputPos
   let leading : Substring :=
-    {str := ← getInput, startPos := (← getWsBefore).stopPos, stopPos := start}
+    {str := ← getInput, startPos := (← getIgnoredBefore).stopPos, stopPos := start}
   let a ← p
   let stop ← getInputPos
   let trailing ← consumeIgnored
@@ -252,7 +328,7 @@ def extractSourceInfo (p : LParse α) : LParse SourceInfo := do
   return info
 
 def identAtom : LParse String := do
-  if (← attempt <| satisfy isIdBeginEscape) then
+  if (← trySatisfy isIdBeginEscape) then
     let ident ← extract do
       skipToSatisfy isIdEndEscape ["end of identifier escape"]
     skip
@@ -264,7 +340,7 @@ def identAtom : LParse String := do
 
 partial def name : LParse Name := do
   let rec identCont (n : Name) := do
-    if let some s ← attempt? <| skipChar '.' *> identAtom then
+    if let some s ← attempt? <| atomic <| skipChar '.' *> identAtom then
       identCont (.str n s)
     else
       return n
@@ -292,7 +368,7 @@ def rawCh (c : Char) (trailingWs := false) : LParse Syntax := do
   let input ← getInput
   let start ← getInputPos
   let leading : Substring :=
-    {str := input, startPos := (← getWsBefore).stopPos, stopPos := start}
+    {str := input, startPos := (← getIgnoredBefore).stopPos, stopPos := start}
   skipChar c
   let stop ← getInputPos
   let trailing := if trailingWs then (← consumeIgnored) else
@@ -300,9 +376,14 @@ def rawCh (c : Char) (trailingWs := false) : LParse Syntax := do
   let info := .original leading start trailing stop
   return .atom info c.toString
 
-@[inline] def keyword (kw : Name) : LParse Syntax := do
-  atomOf do let n ← name; unless n = kw do
-    throwUnexpected "unexpected ident '{n}'" [s!"'{kw}'"]
+@[inline] def keyword (kw : Name) : LParse Syntax :=
+  atomOf do
+    let n ← name
+    if n = kw then
+      if kw = (← read).forbiddenKw then
+        error "forbidden keyword"
+     else
+      throwUnexpected "unexpected ident '{n}'" [s!"'{kw}'"]
 
 def symbol (sym : String) : LParse Syntax := do
   let sym := sym.trim
@@ -380,7 +461,7 @@ partial def interpolatedStr (p : LParse Syntax) : LParse InterpolatedStr :=
   node interpolatedStrKind <| atomic do
     let start ← getInputPos
     let leading : Substring :=
-      {str := ← getInput, startPos := (← getWsBefore).stopPos, stopPos := start}
+      {str := ← getInput, startPos := (← getIgnoredBefore).stopPos, stopPos := start}
     skipChar '"'
     let rec loop (head : String.Pos) (leading : Substring) (acc : Array Syntax) := do
       match (← next1) with
@@ -388,8 +469,7 @@ partial def interpolatedStr (p : LParse Syntax) : LParse InterpolatedStr :=
       | '"' =>
         let input ← getInput
         let tail ← getInputPos
-        let trailing : Substring :=
-          {str := input, startPos := tail, stopPos := tail}
+        let trailing ← consumeIgnored
         return acc.push <| mkNode interpolatedStrLitKind
           #[.atom (.original leading head trailing tail) (input.extract head tail)]
       | '{' =>
@@ -427,7 +507,7 @@ def scientificLit : LParse ScientificLit :=
     if c == '.' then
       skipMany digit
     else if c == 'e' || c == 'E' then
-      skipIfSatisfy fun c => c == '-' || c == '+'
+      skipIfSatisfy (fun c => c == '-' || c == '+') ["exponent"]
       skipMany1 digit
     else
       throwUnexpected s!"unexpected '{c}'" expected

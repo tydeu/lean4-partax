@@ -7,6 +7,8 @@ import Lean.Util.MonadBacktrack
 
 namespace Partax
 
+open Lean (MonadBacktrack saveState restoreState)
+
 --------------------------------------------------------------------------------
 /-! # Abstractions                                                            -/
 --------------------------------------------------------------------------------
@@ -19,9 +21,17 @@ class MonadInput (m : Type → Type u) where
 
 export MonadInput (getInput getInputPos setInputPos)
 
+instance [MonadLift m n] [MonadInput m] : MonadInput n where
+  getInput := liftM (m := m) getInput
+  getInputPos := liftM (m := m) getInputPos
+  setInputPos p := liftM (m := m) <| setInputPos p
+
 /-- Class for monads that permit Lean-style unexpected/expected errors. -/
 class ThrowUnexpected (m : Type u → Type v) where
   throwUnexpected {α} : String → List String → m α
+
+instance [MonadLift m n] [ThrowUnexpected m] : ThrowUnexpected n where
+  throwUnexpected u e := liftM (m := m) <| ThrowUnexpected.throwUnexpected u e
 
 @[macro_inline] def throwUnexpected [ThrowUnexpected m] (msg : String) (expected : List String := []) : m α :=
   ThrowUnexpected.throwUnexpected msg expected
@@ -44,6 +54,12 @@ class MonadCheckpoint (m : Type u → Type v) where
 
 export MonadCheckpoint (checkpoint)
 
+instance [MonadBacktrack σ m] [Bind m] : MonadCheckpoint m where
+  checkpoint f := saveState >>= fun s => f (restoreState s)
+
+@[inline] def saveAndRestoreState [Monad m] [MonadBacktrack σ m] (r : σ) : m σ := do
+  let s ← saveState; restoreState r; return s
+
 /-- The `orElse` part of `Alternative`. Implies `OrElse (m α)`.
 Exists because `MonadExcept` implies `MonadOrElse` but not `Alternative`,
 and we cannot use `OrElse (m α)` in polymorphic `variable` declarations. -/
@@ -58,10 +74,6 @@ instance [MonadExcept ε m] : MonadOrElse m where
 
 instance [Alternative m] : MonadOrElse m where
   orElse := Alternative.orElse
-
-open Lean (MonadBacktrack saveState restoreState)
-@[inline] def saveAndRestoreState [Monad m] [MonadBacktrack σ m] (r : σ) : m σ := do
-  let s ← saveState; restoreState r; return s
 
 --------------------------------------------------------------------------------
 /-! ## Primitives                                                             -/
@@ -96,14 +108,6 @@ variable [ThrowUnexpected m]
 /-- Throw if at end-of-input. -/
 @[inline] def checkNotEOI (expected : List String := []) : m PUnit := do
   if (← getIsEOI) then throwUnexpectedEOI expected
-
-/-- Invoke `f` with a proof if the parser head is not at end-of-input. -/
-@[inline] def skipIfNotEOI
-(f : (input : String) → (pos : String.Pos) → ¬ input.atEnd pos → m PUnit) : m PUnit := do
-  let input ← getInput
-  let inputPos ← getInputPos
-  if h : ¬ input.atEnd inputPos then
-    f input inputPos h
 
 /-- Invoke `f` with a proof that the parser head is not at end-of-input. -/
 @[inline] def withNotEOI
@@ -166,44 +170,50 @@ end
 section
 variable [Monad m] [MonadCheckpoint m]
 
-/--
-Apply `p` as a single atomic parser.
-On any failure within it, the parser state is reset back to before `p`,
-and the error is re-thrown. -/
-@[inline] def atomic [MonadExcept ε m] (p : m α) : m α :=
-  checkpoint fun restore => try p catch e => restore *> throw e
-
 /-- Apply `p` and backtrack unless it errors. -/
 @[inline] def lookahead (p : m α) : m PUnit :=
   checkpoint fun restore => p *> restore
 
-variable [MonadOrElse m]
-
-/--
-Attempts to apply `p` and returns whether it succeeded.
-On failure, the parser state is reset back to before `p`. -/
-@[inline] def attempt (p : m α) : m Bool :=
-  checkpoint fun restore => p *> pure true <|> restore *> pure false
-
-/-- Attempts to apply `p`, otherwise resets state and returns `a`.-/
-@[inline] def attemptD (a : α) (p : m α) : m α :=
-  checkpoint fun restore => p <|> restore *> pure a
-
-/-- Attempts to apply `p`, otherwise resets state and returns `none`. -/
-@[inline] def attempt? (p : m α) : m (Option α) :=
-  attemptD none <| some <$> p
-
-/-- Attempts to apply `p1`, otherwise resets state and applies `p2`. -/
-@[inline] def attemptOrElse (p1 p2 : m α) : m α :=
-  checkpoint fun restore => p1 <|> restore *> p2
+variable [MonadExcept ε m]
 
 /-- Apply `p`, backtrack, and return whether `p` succeeded. -/
 @[inline] def isFollowedBy (p : m α) : m Bool :=
-  checkpoint fun restore => p *> restore *> pure true <|> restore *> pure false
+  checkpoint fun restore => try p *> pure true catch _ => restore; pure false
 
 /-- Error with `msg` if `isFollowedBy p`. -/
 @[inline] def notFollowedBy [ThrowUnexpected m] (p : m α) (msg : String) : m PUnit := do
   if (← isFollowedBy p) then throwUnexpected msg
+
+/--
+Apply `p` as a single atomic parser.
+On any failure within it, the parser state is reverted back to before `p`,
+and the error is re-thrown. -/
+@[inline] def atomic (p : m α) : m α :=
+  checkpoint fun restore => try p catch e => restore *> throw e
+
+variable [MonadInput m]
+
+/--
+Attempt to apply `p`.
+If `p` errors without consuming input, revert the state and return `a`.
+-/
+@[inline] def attemptD  (a : α) (p : m α) : m α := do
+  let iniPos ← getInputPos
+  checkpoint fun restore =>
+  try p catch e =>
+    if iniPos < (← getInputPos) then
+      throw e
+    else
+      restore
+      return a
+
+/-- Attempt to apply `p`. Return whether `p` succeeded. -/
+@[inline] def attempt (p : m α) : m Bool :=
+  attemptD false <| Functor.mapConst true p
+
+/-- Attempt to apply `p`. On failure, returns `none`. -/
+@[inline] def attempt? (p : m α) : m (Option α) :=
+  attemptD none <| some <$> p
 
 end
 
@@ -217,14 +227,12 @@ variable [Monad m]
 @[inline] def andthen (p1 : m α) (p2 : m β) : m (α × β) := do
   return (← p1, ← p2)
 
-variable [MonadOrElse m]
-
-@[inline] def choice (ps : Array (m α)) (h : ps.size > 0) : m α := do
+@[inline] def choice [MonadOrElse m] (ps : Array (m α)) (h : ps.size > 0) : m α := do
   ps.toSubarray.popFront.foldr (· <|> ·) ps[0]
 
-variable [MonadCheckpoint m]
+variable [MonadCheckpoint m] [MonadExcept ε m] [MonadInput m]
 
-@[inline] partial def collectManyCore (p : m α) (acc : Array α) : m (Array α) := do
+@[specialize] partial def collectManyCore (p : m α) (acc : Array α) : m (Array α) := do
   if let some a ← attempt? p then collectManyCore p (acc.push a) else pure acc
 
 @[inline] def collectMany (p : m α) : m (Array α) :=
@@ -233,7 +241,7 @@ variable [MonadCheckpoint m]
 @[inline] def collectMany1 (p : m α) : m (Array α) := do
   let a ← p; collectManyCore p #[a]
 
-@[inline] partial def skipMany (p : m α) : m PUnit := do
+@[specialize] partial def skipMany (p : m α) : m PUnit := do
   if (← attempt p) then skipMany p
 
 @[inline] def skipMany1 (p : m α) : m PUnit :=
@@ -258,17 +266,33 @@ variable [Monad m] [MonadInput m] [ThrowUnexpected m]
 
 /-- Take the head character if its satisfies `p`. Otherwise, throw an error. -/
 @[inline] def satisfy (p : Char → Bool) (expected : List String := []) : m Char := do
-  let c ← next1 expected; if p c then return c else throwUnexpected s!"unexpected '{c}'" expected
+  withNotEOI (expected := expected) fun input pos h => do
+    let c := input.get' pos h
+    if p c then
+      setInputPos <| input.next' pos h
+      return c
+    else
+      throwUnexpected s!"unexpected '{c}'" expected
 
 /-- Consume the head character if its satisfies `p`. Otherwise, throw an error. -/
 @[inline] def skipSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit :=
   discard <| satisfy p expected
 
-/-- Consume the head character if its satisfies `p`. Otherwise, do nothing. -/
-@[inline] def skipIfSatisfy (p : Char → Bool) : m PUnit := do
-  skipIfNotEOI fun input pos h => do
+/--
+Consume the head character if its satisfies `p`.
+Returns whether it succeeded. Throws on end-of-input.
+-/
+@[inline] def trySatisfy (p : Char → Bool) (expected : List String := []) : m Bool := do
+  withNotEOI (expected := expected) fun input pos h => do
     if p <| input.get' pos h then
       setInputPos <| input.next' pos h
+      return true
+    else
+      return false
+
+/-- Consume the head character if its satisfies `p`. Throws on end-of-input. -/
+@[inline] def skipIfSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
+  discard <| trySatisfy p expected
 
 /-- Consume the characters until one matches `p`. Does not consume the matched character. -/
 @[specialize] partial def skipToSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
@@ -294,7 +318,7 @@ variable [Monad m] [MonadInput m] [ThrowUnexpected m]
   satisfy Char.isWhitespace ["whitespace character"]
 
 /-- Skip over whitespace characters in the input. -/
-@[inline] def skipWs [MonadCheckpoint m] [MonadOrElse m] : m Unit := do
+@[inline] def skipWs [MonadCheckpoint m] [MonadExcept ε m] : m Unit := do
   skipMany wsChar
 
 /-- Matches a single binary digit (bit). -/

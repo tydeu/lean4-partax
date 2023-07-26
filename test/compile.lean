@@ -73,7 +73,7 @@ Example of compiling a real parser
 -/
 syntax exP := Command.docComment
 compile_parser exP
-#match_stx exP exP.lParse | /-- hello /- hello -/ -/
+#match_stx exP exP.lParse | /-- hello/hello /- hello-hello -/ -/
 
 /-
 Example of using our own builtin aliases
@@ -83,7 +83,7 @@ def LParse.decimal : LParse Syntax :=
 def decimal : ParserDescr := .const `decimal
 syntax exSepDigit := "[" decimal,* "]"
 #print exSepDigit
-compile_parser exSepDigit {CompileConfig.lparse with
+compile_parser exSepDigit with {CompileConfig.lparse with
   syntaxAliases := CompileConfig.lparse.syntaxAliases
     |>.insert `decimal ``LParse.decimal
 }

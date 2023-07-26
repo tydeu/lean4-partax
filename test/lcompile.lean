@@ -13,12 +13,14 @@ Tests of the whole compiled Lean grammar.
 open Partax Test LCompile
 
 #match_stx term term | a.1
+#match_stx term term | a.{1}
 #match_stx term term | true
 #match_stx term term | id a
 #match_stx term term | 2 + 2 = 4
 
 #match_stx doElem doElem | return ()
 #match_stx doElem doElem | if a then _
+#match_stx doElem doElem | unless a do return ()
 
 #match_stx conv conv |
   first
@@ -38,3 +40,16 @@ open Partax Test LCompile
       apply congrArg; apply Nat.add_comm
     rw [succ_add m n]
     apply this
+
+def parseFile (path : System.FilePath) : IO PUnit := do
+  let parse : LParseT IO PUnit := do
+    IO.println <| toString <| ← Module.header
+    withReader ({· with kws := command.keywords, syms := command.symbols, cats := command.categories, }) do
+      repeat do
+      let iniPos ← getInputPos
+      try IO.println <| toString <| ← command catch e =>
+      if iniPos < (← getInputPos) then throw e else break
+  let input ← IO.FS.readFile path
+  IO.ofExcept <| ← (parse.run input path.toString).run
+
+#eval parseFile <| System.FilePath.mk "Partax" / "Basic.lean"

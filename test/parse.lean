@@ -47,11 +47,11 @@ def leftArrow := LParse.unicodeSymbol "← " "<- "
 #match_stx Term.leftArrow leftArrow | <-
 
 -- interpolated strings
-def interpolatedNum := interpolatedStr numLitNoAntiquot
-def Partax.LParse.interpolatedNum := interpolatedStr numLit
-#match_stx interpolatedNum LParse.interpolatedNum | "a{1}b"
+def interpolatedNum := node `null <| interpolatedStr numLit >> numLit
+def Partax.LParse.interpolatedNum := node `null <| interpolatedStr numLit >> numLit
+#match_stx interpolatedNum LParse.interpolatedNum | "a{1}b" 1
 
 -- `sepBy1`
-def matrix := sepBy1 (sepBy1 numLitNoAntiquot ",") "|"
+def matrix := sepBy1 (sepBy1 numLit ",") "|"
 def Partax.LParse.matrix := sepBy1 (sepBy1 numLit "," (atom ",")) "|" (atom "|")
 #match_stx matrix LParse.matrix | 1, 2 | 3, 4 | 5, 6
