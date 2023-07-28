@@ -12,11 +12,14 @@ Partax provides two configurable commands for compiling Lean syntax: `compile_pa
 
 ```lean
 import Lean
+import Partax
 
-compile_parser Lean.Parser.Term.attributes => attrs -- with CompileConfig.lparse
+open scoped Partax
+
+compile_parser Lean.Parser.Term.attributes => attrs -- with CompileConfig.lParse
 #eval attrs.run "@[instance high, inline]" -- TSyntax `Lean.Parser.Term.attributes
 
-compile_parser_category prio -- with CompileConfig.lparse
+compile_parser_category prio -- with CompileConfig.lParse
 #eval prio.run "default + default" -- TSyntax `Lean.Parser.Syntax.addPrio
 
 open Lean Elab Command in
@@ -31,8 +34,8 @@ open Lean Elab Command in
 There are a number of additional features planned for Partax, including:
 
 * Support for antiquotations (e.g. `$(...)` in ``` `(...) ``` syntax).
-* Better optimized `LParse` with caching and indexed category parsing.
+* Better optimized `LParse` with caching, a syntax stack, and indexed category parsing.
 * Formally verified well-formed parser results (e.g., well-formed nodes).
 * More compilation customization and other test cases than `LParse`.
-* An extended `syntax` command (called `grammar`) that supports all standard Lean parser features.
 * Improved compilation performance (compiling large categories like `term` can currently take a few minutes).
+* An extended `syntax` command (called `grammar`) that supports all standard Lean parser features.

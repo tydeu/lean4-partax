@@ -21,8 +21,13 @@ namespace Partax
 local instance : Coe Name Ident where
   coe := mkIdent
 
-def stripPrefix (p n : Name) : Name :=
+@[inline] def stripPrefix (p n : Name) : Name :=
   n.replacePrefix p .anonymous
+
+def stripPrefixIf (f : Name → Bool) : Name → Name
+| .anonymous   => .anonymous
+| n@(.str p s) => if f n then .anonymous else .str (stripPrefixIf f p) s
+| n@(.num p s) => if f n then .anonymous else .num (stripPrefixIf f p) s
 
 @[implemented_by Lean.Environment.evalConstCheck] opaque evalConstCheck
 (α) (env : Environment) (opts : Options) (typeName constName : Name) : ExceptT String Id α
@@ -90,6 +95,9 @@ structure ParserData where
 @[inline] def ParserData.addCategory (cat : Name) (self : ParserData) : ParserData :=
   {self with cats := self.cats.insert cat}
 
+structure CompileContext where
+  rootName : Name := .anonymous
+
 structure CompileState extends ParserData where
   /-- Array of compiled parser definitions. -/
   defs : Array Command := #[]
@@ -98,10 +106,10 @@ structure CompileState extends ParserData where
   /-- Compilation metadata for each parser definition. -/
   dataMap : NameMap ParserData := {}
 
-abbrev CompileT m := StateT CompileState m
+abbrev CompileT m := ReaderT CompileContext <| StateT CompileState m
 
-def CompileT.run [Functor m] (x : CompileT m α) : m (Array Command) :=
-  StateT.run x {} <&> (·.2.defs)
+@[inline] def CompileT.run [Functor m] (x : CompileT m α) : m (Array Command) :=
+  (StateT.run (ReaderT.run x {}) {}) <&> (·.2.defs)
 
 abbrev CompileM := CompileT CommandElabM
 
@@ -189,16 +197,15 @@ abbrev AppHandler (α) :=
   Name → Array Expr → (Expr → CompileM α) → CompileM α
 
 structure CompileConfig where
-  /-- Default namespace for `compile_parser -/
-  defaultNs : Name
   /-- Original parser to compiled parser name mapping. -/
-  mapName : Name → Name
+  mapName (rootName : Name) (kind : Name) : Name
   /-- Constant-to-constant overrides for constants referenced in `ParserDescr`. -/
   syntaxAliases : NameMap Name := {}
   /-- Constant-to-constant overrides for `Parser` constants. -/
   parserAliases : NameMap Name := {}
   /-- Constant-to-handler mappings for `Parser` function applications. -/
   parserAppHandlers : NameMap (AppHandler Term) := {}
+  deriving Inhabited
 
 /--
 An app handler that compiles and returns the function's first argument.
@@ -292,11 +299,15 @@ def compileCategoryParser : AppHandler Term := fun _ args compileExpr => do
   ``(LParse.categoryRef $(quote catName) $rbp)
 
 @[inline] def compileParserDef (cfg : CompileConfig)  (kind : Name) (compile : CompileM Term) : CompileM Name := do
-  let pName := cfg.mapName kind
-  let p ← collectParserDataFor pName do compile
-  pushDef pName p
-  modify fun s => {s with compileMap := s.compileMap.insert kind pName}
-  return pName
+  if let some pName := (← get).compileMap.find? kind then
+    addParserDataOf pName
+    return pName
+  else
+    let pName := cfg.mapName (← read).rootName kind
+    let p ← collectParserDataFor pName do compile
+    pushDef pName p
+    modify fun s => {s with compileMap := s.compileMap.insert kind pName}
+    return pName
 
 def compileCategoryDef (catName : Name) (leading trailing : Array Name) : CompileM Unit := do
   let ref ← getRef
@@ -311,10 +322,9 @@ def compileCategoryDef (catName : Name) (leading trailing : Array Name) : Compil
   modify fun s => {s with compileMap := s.compileMap.insert catName catName}
 
 /-- The standard compilation configuration for produce `LParse`-based definitions. -/
-def CompileConfig.lparse : CompileConfig where
-  defaultNs := "lParse"
-  mapName name :=
-    stripPrefix `Lean.Parser name
+def CompileConfig.lParse : CompileConfig where
+  mapName _rootName name :=
+    stripPrefixIf (fun n => n == `Lean.Parser || n == `Lean) name
   syntaxAliases :=
     ({} : NameMap Name)
   parserAliases :=
@@ -411,6 +421,21 @@ end
 section
 open Meta Elab Term Command Syntax Parser
 
+/-- Extract parser data from a precompiled definition. -/
+def extractParserDataOf (kind const : Name) : CompileM PUnit := do
+  let .ok kws := evalConstCheck NameSet (← getEnv) (← getOptions) ``NameSet (const.str "keywords")
+    | throwError "parser '{const}' is missing a 'keywords : NameSet' definition"
+  let .ok syms := evalConstCheck SymbolTrie (← getEnv) (← getOptions) ``SymbolTrie (const.str "symbols")
+    | throwError "parser '{const}' is missing a 'symbols : SymbolTrie' definition"
+  let .ok cats := evalConstCheck ParserMap (← getEnv) (← getOptions) ``ParserMap (const.str "categories")
+    | throwError "parser '{const}' is missing a 'categories : ParserMap' definition"
+  let data : ParserData := {kws, syms := syms.toSet, cats := cats.toSet}
+  modify fun s => {s with
+    toParserData := s.toParserData.union data
+    compileMap := s.compileMap.insert kind const
+    dataMap := s.dataMap.insert const data
+  }
+
 @[inline] def checkParserType (info : ConstantInfo) : MetaM (Option Nat) :=
   forallTelescope info.type fun as r =>
     match r with
@@ -435,9 +460,6 @@ where
       let some numArgs ← liftTermElabM <| checkParserType info
         | return mkIdentFrom (← getRef) name
       withStepTrace name do
-      if let some pName := (← get).compileMap.find? name then
-        addParserDataOf pName
-        return pName
       if numArgs > 0 then
         throwError "cannot compile parameterized parser '{x}'"
       let some p := info.value?
@@ -515,13 +537,10 @@ where
     return mkConst name
   | .nodeWithAntiquot _name kind p => do -- No antiquote support
     withStepTrace kind do
-    if let some pName := (← get).compileMap.find? kind then
-      addParserDataOf pName
-      return mkConst pName
-    else
+    let pName ← compileParserDef cfg kind do
       let x := mkAppN (mkConst ``Parser.node) #[toExpr kind, ← compileDescr p]
-      let pName ← compileParserDef cfg kind do compileParserExpr cfg x
-      return mkConst pName
+      compileParserExpr cfg x
+    return mkConst pName
   | .sepBy p sep psep allowTrailingSep => do
     return mkAppN (mkConst ``sepBy)
       #[← compileDescr p, toExpr sep, ← compileDescr psep, toExpr allowTrailingSep]
@@ -548,20 +567,6 @@ def compileParserInfoToExpr (cfg : CompileConfig) (info : ConstantInfo) : Compil
 @[inline] def compileParserInfo (cfg : CompileConfig) (info : ConstantInfo) : CompileM Term := do
   compileParserInfoToExpr cfg info >>= compileParserExpr cfg
 
-/-- Extract parser data from a precompiled definition. -/
-def extractParserDataOf (name const : Name) : CompileM PUnit := do
-  let .ok kws := evalConstCheck NameSet (← getEnv) (← getOptions) ``NameSet (const.str "keywords")
-    | throwError "parser '{const}' is missing a 'keywords : NameSet' definition"
-  let .ok syms := evalConstCheck SymbolTrie (← getEnv) (← getOptions) ``SymbolTrie (const.str "symbols")
-    | throwError "parser '{const}' is missing a 'symbols : SymbolTrie' definition"
-  let .ok cats := evalConstCheck ParserMap (← getEnv) (← getOptions) ``ParserMap (const.str "categories")
-    | throwError "parser '{const}' is missing a 'categories : ParserMap' definition"
-  let data : ParserData := {kws, syms := syms.toSet, cats := cats.toSet}
-  modify fun s => {s with
-    toParserData := s.toParserData.union data
-    dataMap := s.dataMap.insert name data
-  }
-
 def compileParserCategoryCore (cfg : CompileConfig) (catName : Name) : CompileM PUnit := do
   let cats := Parser.parserExtension.getState (← getEnv) |>.categories
   let some cat := cats.find? catName
@@ -572,11 +577,7 @@ def compileParserCategoryCore (cfg : CompileConfig) (catName : Name) : CompileM 
     let some info := (← getEnv).find? kind
       | throwError "no constant for parser kind '{kind}'"
     let p ← withStepTrace kind (collapsed := true) do
-      if let some pName := (← get).compileMap.find? kind then
-        addParserDataOf pName
-        return pName
-      else
-        compileParserDef cfg kind do compileParserInfo cfg info
+      compileParserDef cfg kind do compileParserInfo cfg info
     match info.type with
     | .const ``TrailingParser _ | .const ``TrailingParserDescr _ =>
       trailingPs := trailingPs.push p
@@ -598,18 +599,23 @@ partial def compileParserCategory (cfg : CompileConfig) (catName : Name) : Compi
   (← get).cats.erase catName |>.forM (compileParserCategory cfg ·)
   modify fun s => {s with dataMap := s.dataMap.insert catName s.toParserData}
 
-def compileParserInfoTopLevel (cfg : CompileConfig) (info : ConstantInfo) : CompileM Unit := do
+def compileParserCategoryTopLevel (cfg : CompileConfig) (catName : Name) : CompileM Unit := do
+  withReader ({· with rootName := catName}) do
+    compileParserCategory cfg catName
+  pushCategoriesDataDefs
+
+def compileParserInfoTopLevel (cfg : CompileConfig) (pName : Name) (info : ConstantInfo) : CompileM Unit := do
   withStepTrace info.name (collapsed := true) do
-  let p ← compileParserInfo cfg info
-  unless (← get).compileMap.contains info.name do
-    let pName := cfg.mapName info.name
+  let p ← withReader ({· with rootName := pName}) do
+    compileParserInfo cfg info
+  unless (← get).compileMap.find? info.name = some pName do
     pushDef pName p
     modify fun s => {s with
       dataMap := s.dataMap.insert pName s.toParserData
       compileMap := s.compileMap.insert info.name pName
     }
   (← get).cats.forM (compileParserCategory cfg ·)
-  pushParserDataDefs .anonymous (← get).toParserData
+  pushParserDataDefs pName (← get).toParserData
   pushCategoriesDataDefs
 
 end
@@ -621,45 +627,51 @@ end
 section
 open Elab Command Term PrettyPrinter
 
-syntax dry := "(" noWs &"dry" noWs ")"
-
-def traceDefs (defs : Array Command) : CommandElabM MessageData :=
-  defs.foldlM (init := "") fun str cmd =>
+def traceDefs (defs : Array Command) : CommandElabM Unit := do
+  trace[Partax.compile.result] ← defs.foldlM (init := "") fun str cmd =>
     return str ++ s!"\n{(← liftCoreM <| ppCommand cmd).pretty 90}"
 
-def evalOptConfig (cfg? : Option Term) : TermElabM CompileConfig :=
+initialize defaultCompileConfigExt : EnvExtension CompileConfig ←
+  registerEnvExtension (pure CompileConfig.lParse)
+
+def evalCompileConfig (cfg : Term) : TermElabM CompileConfig :=
+  evalTerm CompileConfig (mkConst ``CompileConfig) cfg
+
+def evalOptCompileConfig (cfg? : Option Term) : TermElabM CompileConfig :=
   match cfg? with
-  | some cfg => evalTerm CompileConfig (mkConst ``CompileConfig) cfg
-  | none => return CompileConfig.lparse
+  | some cfg => evalCompileConfig cfg
+  | none =>  return defaultCompileConfigExt.getState (← getEnv)
+
+scoped syntax "set_parser_compile_config " term : command
+elab_rules : command | `(set_parser_compile_config $cfg) => do
+  let cfg ← liftTermElabM <| evalCompileConfig cfg
+  modifyEnv (defaultCompileConfigExt.setState · cfg)
+
+syntax dry := "(" noWs &"dry" noWs ")"
 
 scoped syntax "compile_parser_category " (dry)? ident (" with " term)? : command
 elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident $[with $cfg?]?) => do
   let catName := cat.getId
   let catDef := Lean.mkConst (``Parser.Category ++ catName)
   discard <| liftTermElabM <| addTermInfo cat catDef
-  let cfg ← liftTermElabM <| evalOptConfig cfg?
-  let defs ← compileParserCategory cfg catName *> pushCategoriesDataDefs |>.run
-  let cmd : Command := ⟨mkNullNode defs⟩
-  trace[Partax.compile.result] ← traceDefs defs
+  let cfg ← liftTermElabM <| evalOptCompileConfig cfg?
+  let defs ← compileParserCategoryTopLevel cfg catName |>.run
+  let cmd : Command := ⟨mkNullNode defs⟩; traceDefs defs
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd
 
-scoped syntax "compile_parser " (dry)? ident (" in " ident)? (" with " term)? : command
-elab_rules : command | `(compile_parser $[$dry?]? $id $[in $ns?]? $[with $cfg?]?) => do
+scoped syntax "compile_parser " (dry)? ident (" => " ident)? (" with " term)? : command
+elab_rules : command | `(compile_parser $[$dry?]? $id $[=> $root?]? $[with $cfg?]?) => do
   let name ← resolveGlobalConstNoOverload id
   let some info := (← getEnv).find? name
     | throwErrorAt id s!"unknown constant '{name}'"
   discard <| liftTermElabM <| addTermInfo id (mkConst name)
-  let cfg ← liftTermElabM <| evalOptConfig cfg?
-  let defs ← compileParserInfoTopLevel cfg info |>.run
-  let cmd : Command := ⟨mkNullNode defs⟩
-  trace[Partax.compile.result] ← traceDefs defs
-  let cmd ← do
-    if let some ns := ns? then
-      `(namespace $ns $cmd end $ns)
-    else
-      let pName := cfg.mapName name
-      let root := id.getId ++ cfg.defaultNs
-      `(namespace $root $cmd end $root abbrev $root := $(root ++ pName))
+  let cfg ← liftTermElabM <| evalOptCompileConfig cfg?
+  let pName :=
+    match root? with
+    | some root => root.getId
+    | none => cfg.mapName .anonymous info.name
+  let defs ← compileParserInfoTopLevel cfg pName info |>.run
+  let cmd : Command := ⟨mkNullNode defs⟩; traceDefs defs
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd
 
 end

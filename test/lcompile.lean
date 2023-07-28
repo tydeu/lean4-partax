@@ -44,7 +44,7 @@ open Partax Test LCompile
 def parseFile (path : System.FilePath) : IO PUnit := do
   let parse : LParseT IO PUnit := do
     IO.println <| toString <| ← Module.header
-    withReader ({· with kws := command.keywords, syms := command.symbols, cats := command.categories, }) do
+    withReader ({· with kws := command.keywords, syms := command.symbols, cats := command.categories}) do
       repeat do
       let iniPos ← getInputPos
       try IO.println <| toString <| ← command catch e =>
