@@ -222,7 +222,7 @@ def compileArg1 : AppHandler α := fun _ args compileExpr =>
   compileExpr args[1]!
 
 /-- Dummy parser for compiled parsers that are not properly supported. -/
-@[inline] def LParse.unsupported (name : Name) : LParse Syntax := do
+@[inline] def LParse.unsupported (name : Name) : LParseM Syntax := do
   error s!"unsupported parser '{name}'"
 
 /-- A parser app handler that produces a `LParse.unsupported`. -/
@@ -315,8 +315,8 @@ def compileCategoryDef (catName : Name) (leading trailing : Array Name) : Compil
   let trailing := trailing.map fun n => mkIdentFrom ref n
   let value ← ``(
     LParse.category $(quote catName)
-      #[$[($leading : LParse Syntax)],*]
-      #[$[($trailing : LParse (SyntaxNodeKind × Array Syntax))],*]
+      #[$[($leading : LParseM Syntax)],*]
+      #[$[($trailing : LParseM (SyntaxNodeKind × Array Syntax))],*]
   )
   pushDef catName value
   modify fun s => {s with compileMap := s.compileMap.insert catName catName}

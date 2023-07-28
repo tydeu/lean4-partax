@@ -81,7 +81,7 @@ compile_parser exP
 /-
 Example of using our own builtin aliases
 -/
-def LParse.decimal : LParse Syntax :=
+def LParse.decimal : LParseM Syntax :=
   LParse.atomOf do skipMany digit
 def decimal : ParserDescr := .const `decimal
 syntax exSepDigit := "[" decimal,* "]"
