@@ -13,10 +13,10 @@ Test that mirrors the README
 open scoped Partax
 
 compile_parser Lean.Parser.Term.attributes => attrs
-#eval attrs.run' "@[instance high, inline]"
+#eval attrs.run' "@[instance high, inline]" -- TSyntax `Lean.Parser.Term.attributes
 
 compile_parser_category prio
-#eval prio.run' "default + default"
+#eval prio.run' "default + default" -- TSyntax `prio
 
 open Lean Elab Command in
 #eval liftMacroM (m := CommandElabM) do

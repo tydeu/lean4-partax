@@ -20,7 +20,7 @@ compile_parser Lean.Parser.Term.attributes => attrs -- with CompileConfig.lParse
 #eval attrs.run' "@[instance high, inline]" -- TSyntax `Lean.Parser.Term.attributes
 
 compile_parser_category prio -- with CompileConfig.lParse
-#eval prio.run' "default + default" -- TSyntax `Lean.Parser.Syntax.addPrio
+#eval prio.run' "default + default" -- TSyntax `prio
 
 open Lean Elab Command in -- 2000
 #eval liftMacroM (m := CommandElabM) do
