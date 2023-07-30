@@ -12,6 +12,8 @@ open Partax Test Lean Parser
 Examples of Lean syntax compilations with relatively short run times.
 -/
 
+set_option trace.Partax.compile true
+
 namespace ex
 
 compile_parser Tactic.caseArg
@@ -22,7 +24,7 @@ compile_parser_category prio
 
 open Lean Elab Command in
 #eval liftMacroM (m := CommandElabM) do
-  match prio.run "default + default" with
+  match prio.run' "default + default" with
   | .ok stx =>
     let val ← evalPrio stx
     unless val == 2000 do Macro.throwError s!"expected 2000, got {val}"
@@ -41,6 +43,8 @@ compile_parser_category stx
 compile_parser_category attr
 #match_stx attr attr | custom (high + default)
 #match_stx attr attr | instance (high + default)
+#match_stx attr attr | extern "hello"
+#match_stx attr attr | specialize
 
 compile_parser Term.attributes => attrs
 #match_stx Parser.Term.attributes attrs | @[instance high, inline]

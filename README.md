@@ -17,17 +17,19 @@ import Partax
 open scoped Partax
 
 compile_parser Lean.Parser.Term.attributes => attrs -- with CompileConfig.lParse
-#eval attrs.run "@[instance high, inline]" -- TSyntax `Lean.Parser.Term.attributes
+#eval attrs.run' "@[instance high, inline]" -- TSyntax `Lean.Parser.Term.attributes
 
 compile_parser_category prio -- with CompileConfig.lParse
-#eval prio.run "default + default" -- TSyntax `Lean.Parser.Syntax.addPrio
+#eval prio.run' "default + default" -- TSyntax `Lean.Parser.Syntax.addPrio
 
 open Lean Elab Command in -- 2000
 #eval liftMacroM (m := CommandElabM) do
-  match prio.run "default + default" with
+  match prio.run' "default + default" with
   | .ok stx => evalPrio stx
   | .error e => Macro.throwError e
 ```
+
+If something goes wrong while compiling, Partax provides two custom trace classes, `trace.Partax.compile.step` and `trace.Partax.compile.result`, to view, respectively, the parser-by-parser steps of the compilation and the final produced definitions.
 
 ## Limitations & Future Work
 

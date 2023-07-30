@@ -171,14 +171,13 @@ def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
   pushSymbolsDef pName data.syms
   pushCategoriesDef pName data.cats
   let maps ← data.cats.foldM (init := #[]) fun a n =>
-    return a.push <| ← ``(($(quote n), $(mkIdent n)))
+    return a.push <| ← ``(($(quote n), $(mkIdent <| n.str "raw")))
   `(
-    partial def $pName := {
+    def $pName := show LParser _ from {
       raw := $(mkIdent <| pName.str "raw")
       kws := $(mkIdent <| pName.str "keywords")
       syms := $(mkIdent <| pName.str "symbols")
       cats := ParserMap.ofList [$maps,*]
-      : LParser _
     }
   )
 
@@ -214,6 +213,8 @@ abbrev AppHandler (α) :=
 structure CompileConfig where
   /-- Original parser to compiled parser name mapping. -/
   mapName (rootName : Name) (kind : Name) : Name
+  /-- Constant-to-priority mappings for parsers in a category (default: 1000). -/
+  parserPriorities : NameMap Nat := {}
   /-- Constant-to-constant overrides for constants referenced in `ParserDescr`. -/
   syntaxAliases : NameMap Name := {}
   /-- Constant-to-constant overrides for `Parser` constants. -/
@@ -325,10 +326,13 @@ def compileCategoryParser : AppHandler Term := fun _ args compileExpr => do
     pushDef pRawName p
     return pRawName
 
-def compileCategoryDef (cfg : CompileConfig) (catName : Name) (leading trailing : Array Name) : CompileM Unit := do
+def compileCategoryDef (cfg : CompileConfig)
+(catName : Name) (leading trailing : Array (Name × Name)) : CompileM Unit := do
   let ref ← getRef
-  let leading := leading.map fun n => mkIdentFrom ref n
-  let trailing := trailing.map fun n => mkIdentFrom ref n
+  let prioCmp a b : Bool :=
+    cfg.parserPriorities.findD a.1 1000 < cfg.parserPriorities.findD b.1 1000
+  let leading := leading.qsort prioCmp |>.map fun (_,n) => mkIdentFrom ref n
+  let trailing := trailing.qsort prioCmp |>.map fun (_,n) => mkIdentFrom ref n
   let value ← ``(
     LParse.category $(quote catName)
       #[$[($leading : LParseM Syntax)],*]
@@ -342,6 +346,10 @@ def compileCategoryDef (cfg : CompileConfig) (catName : Name) (leading trailing 
 def CompileConfig.lParse : CompileConfig where
   mapName _rootName name :=
     stripPrefixIf (fun n => n == `Lean.Parser || n == `Lean) name
+  parserPriorities :=
+    ({} : NameMap Nat)
+    -- low priority / apply last
+    |>.insert ``Parser.Attr.simple 100 -- needed b/c no leading ident behavior
   syntaxAliases :=
     ({} : NameMap Name)
   parserAliases :=
@@ -597,9 +605,9 @@ def compileParserCategoryCore (cfg : CompileConfig) (catName : Name) : CompileM 
       compileParserDef cfg kind do compileParserInfo cfg info
     match info.type with
     | .const ``TrailingParser _ | .const ``TrailingParserDescr _ =>
-      trailingPs := trailingPs.push p
+      trailingPs := trailingPs.push (kind, p)
     | _ =>
-      leadingPs := leadingPs.push p
+      leadingPs := leadingPs.push (kind, p)
   compileCategoryDef cfg catName leadingPs trailingPs
 
 partial def compileParserCategory (cfg : CompileConfig) (catName : Name) : CompileM PUnit := do
@@ -639,9 +647,7 @@ def compileParserInfoTopLevel (cfg : CompileConfig) (rootName : Name) (info : Co
       pure pName
   (← get).cats.forM (compileParserCategory cfg ·)
   pushCategoriesDataDefs
-  let some data := (← get).dataMap.find? pName
-    | throwError "missing parser data for '{pName}'"
-  pushCmd <| ← mkLParserDef pName data
+  pushCmd <| ← mkLParserDef pName (← get).toParserData
   unless rootName = pName do
     pushDef rootName pName
 

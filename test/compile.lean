@@ -12,6 +12,8 @@ open Partax Test Lean Parser
 Examples of Custom syntax compilations with relatively short run times.
 -/
 
+set_option trace.Partax.compile true
+
 /-
 A compile config that embeds nested compiled nodes into the root node's namespace
 Allows tests to compile the same node twice without changing namespaces.
@@ -22,7 +24,6 @@ def compileConfig := {CompileConfig.lParse with
     if r.isAnonymous then `TCompile ++ base else r ++ `kinds ++ base
 }
 
-set_option trace.Partax.compile true
 set_parser_compile_config compileConfig
 
 /-

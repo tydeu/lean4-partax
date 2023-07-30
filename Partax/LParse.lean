@@ -12,7 +12,10 @@ open Lean
 
 namespace Partax
 
-export Lean.Parser (InputContext Error)
+export Lean.Parser (InputContext mkInputContext)
+
+instance : Coe String InputContext where
+  coe s := mkInputContext s "<input>"
 
 abbrev FieldIdx := TSyntax fieldIdxKind
 abbrev InterpolatedStr := TSyntax interpolatedStrKind
@@ -56,16 +59,24 @@ structure LParseContext extends InputContext, LParseData where
   savedPos? : Option String.Pos := none
   forbiddenKw : Name := .anonymous
 
+@[inline] def mkLParseContext (ictx : InputContext) (data : LParseData := {}) (rbp := 0) : LParseContext :=
+  {toInputContext := ictx, prec := rbp, toLParseData := data}
+
+instance : Coe InputContext LParseContext where
+  coe ictx := mkLParseContext ictx
+
 structure LParseState where
   lhsPrec : Nat := 0
   inputPos : String.Pos := 0
   ignoredBefore : Substring := "".toSubstring
 
+abbrev LParseError := Lean.Parser.Error
+
 /-- Parser monadic transformer for Lean-style parsing. -/
-abbrev LParseT (m) := ReaderT LParseContext <| ExceptT Error <| StateT LParseState m
+abbrev LParseT (m) := ReaderT LParseContext <| ExceptT LParseError <| StateT LParseState m
 
 /-- Combinatorial, monadic parser for Lean-style parsing. -/
-abbrev LParseM := ReaderT LParseContext <| EStateM Error LParseState
+abbrev LParseM := ReaderT LParseContext <| EStateM LParseError LParseState
 
 instance [Pure m] : MonadLift LParseM (LParseT m) where
   monadLift p := fun r s =>
@@ -159,7 +170,7 @@ variable [MonadCheckpoint m] [MonadExcept ε m]
   return ignored
 
 /-- Parse full input. Consumes initial ignored tokens and throws if input remains. -/
-@[inline] def fullInput [MonadIgnoredBefore m] (p : m α) : m α := do
+@[specialize] def fullInput [MonadIgnoredBefore m] (p : m α) : m α := do
   consumeIgnored *> p <* checkEOI
 
 end LParse
@@ -180,20 +191,24 @@ instance : MonadBacktrack LParseState LParseM where
 instance : ThrowUnexpected LParseM where
   throwUnexpected unexpected expected := throw {unexpected, expected}
 
-open Parser in
-nonrec def LParseM.run
-(input : String) (p : LParseM α) (fileName := "<string>")
-(rbp := 0) (data : LParseData := {}) : Except String α :=
-  let ictx := mkInputContext input fileName
-  let ctx := {toInputContext := ictx, prec := rbp, toLParseData := data}
-  match (LParse.fullInput p : LParseM α).run ctx |>.run {} with
-  | .ok a _ => .ok a
+@[inline] def LParseM.run (ctx : LParseContext) (s : LParseState) (p : LParseM α) : Except String (α × LParseState) :=
+  match p ctx s with
+  | .ok a s => .ok (a, s)
   | .error e s =>
     let pos := ctx.fileMap.toPosition s.inputPos
-    .error <| mkErrorStringWithPos ctx.fileName pos (toString e)
+    let msg := mkErrorStringWithPos ctx.fileName pos (toString e)
+    .error msg
 
-@[inline] def LParser.run (input : String) (p : LParser α) (fileName := "<string>") (rbp := 0) : Except String α :=
-  p.raw.run input fileName rbp p.toLParseData
+@[inline] def LParseM.run'
+(ictx : InputContext) (p : LParseM α)
+(data : LParseData := {}) (rbp := 0) : Except String α :=
+  (·.1) <$> LParseM.run (mkLParseContext ictx data rbp) {} do LParse.fullInput p
+
+def LParser.run (ictx : InputContext) (s : LParseState) (p : LParser α) (rbp := 0) : Except String (α × LParseState) :=
+  p.raw.run (mkLParseContext ictx p.toLParseData rbp) s
+
+@[inline] def LParser.run' (ictx : InputContext) (p : LParser α) (rbp := 0) : Except String α :=
+  p.raw.run' ictx p.toLParseData rbp
 
 instance [Monad m]  : MonadInput (LParseT m) where
   getInput := (·.input) <$> read
@@ -208,17 +223,19 @@ instance [Pure m] : MonadBacktrack LParseState (LParseT m) where
   saveState := fun _ s => pure (.ok s, s)
   restoreState s := fun _ _ => pure (.ok (), s)
 
-open Parser in
-nonrec def LParseT.run [Monad m]
-(input : String) (p : LParseT m α) (fileName := "<string>")
-(rbp := 0) (data : LParseData := {}) : ExceptT String m α := do
-  let ictx := mkInputContext input fileName
-  let ctx := {toInputContext := ictx, prec := rbp, toLParseData := data}
-  match (← (LParse.fullInput p : LParseT m α).run ctx |>.run.run {}) with
-  | (.ok a, _) => pure a
+def LParseT.run [Monad m]
+(ctx : LParseContext) (s : LParseState) (p : LParseT m α) : ExceptT String m (α × LParseState) := do
+  match (← p ctx s) with
+  | (.ok a, _) => pure (a, s)
   | (.error e, s) =>
     let pos := ctx.fileMap.toPosition s.inputPos
-    throw <| mkErrorStringWithPos ctx.fileName pos (toString e)
+    let msg := mkErrorStringWithPos ctx.fileName pos (toString e)
+    throw msg
+
+@[inline] def LParseT.run' [Monad m]
+(ictx : InputContext) (p : LParseT m α)
+(data : LParseData := {}) (rbp := 0) : ExceptT String m α :=
+  (·.1) <$> LParseT.run (mkLParseContext ictx data rbp) {} do LParse.fullInput p
 
 namespace LParse
 

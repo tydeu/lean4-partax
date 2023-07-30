@@ -5,6 +5,7 @@ Authors: Mac Malone
 -/
 import Partax.Test.Basic
 import Partax.Test.LCompile
+import Lean.Elab.Frontend
 
 /-! # Lean Compile Tests
 Tests of the whole compiled Lean grammar.
@@ -41,6 +42,31 @@ open Partax Test LCompile
     rw [succ_add m n]
     apply this
 
+partial def testParseFile (path : System.FilePath) : IO PUnit := do
+  let opts : Lean.Options := {}
+  let input ← IO.FS.readFile path
+  let ictx := mkInputContext input path.toString
+  let (header, parserState, messages) ← Lean.Parser.parseHeader ictx
+  let (_,  lparseState) ← IO.ofExcept <| LParseM.run ictx {} do LParse.consumeIgnored
+  let (lparseHeader, lparseState) ← IO.ofExcept <| Module.header.run ictx lparseState
+  discard <| IO.ofExcept <| matchStxFn lparseHeader header
+  let (env, messages) ← Lean.Elab.processHeader header opts messages ictx
+  let env := env.setMainModule `main
+  let cmdState := Lean.Elab.Command.mkState env messages opts
+  loop ictx cmdState parserState lparseState
+where
+  loop ictx cmdState parserState lparseState := do
+    if ictx.input.atEnd parserState.pos then
+      return
+    let scope := cmdState.scopes.head!
+    let pmctx := { env := cmdState.env, options := scope.opts, currNamespace := scope.currNamespace, openDecls := scope.openDecls }
+    let (cmd, parserState, messages) := Lean.Parser.parseCommand ictx pmctx parserState cmdState.messages
+    let (lparseCmd, lparseState) ← IO.ofExcept <| command.run ictx lparseState
+    discard <| IO.ofExcept <| matchStxFn lparseCmd cmd
+    loop ictx {cmdState with messages} parserState lparseState
+
+#eval testParseFile <| .mk "Partax" / "Basic.lean"
+
 partial def parseFile (path : System.FilePath) : IO PUnit := do
   let parse : LParseT IO PUnit := do
     IO.println <| toString <| ← Module.header
@@ -53,6 +79,7 @@ partial def parseFile (path : System.FilePath) : IO PUnit := do
         if iniPos < (← getInputPos) then throw e
     loop
   let input ← IO.FS.readFile path
-  IO.ofExcept <| ← (parse.run input path.toString).run
+  let ictx := mkInputContext input path.toString
+  IO.ofExcept <| ← (parse.run' ictx).run
 
-#eval parseFile <| System.FilePath.mk "Partax" / "Basic.lean"
+#eval parseFile <| .mk "Partax" / "Basic.lean"

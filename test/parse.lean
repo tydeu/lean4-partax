@@ -13,7 +13,7 @@ Verify that simple parsers work properly.
 -/
 
 -- error on input remaining
-#eval flipExcept <| LParse.numLit.run "32 45"
+#eval flipExcept <| LParse.numLit.run' "32 45"
 
 -- ident
 #match_stx ident LParse.ident | «foo»

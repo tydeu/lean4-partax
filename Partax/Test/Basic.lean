@@ -48,4 +48,4 @@ def matchStxFn (pstx : Syntax) (stx : Syntax) : Except String Syntax := do
     | Macro.throwError "cannot reprint syntax"
   let p : Ident := ⟨matchStx[2]⟩
   let test ← `((matchStxFn · $(quoteSyntax stx)))
-  `(#eval $(p).run $(quote src) >>= $test)
+  `(#eval $(p).run' $(quote src) >>= $test)
