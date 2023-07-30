@@ -47,12 +47,5 @@ def matchStxFn (pstx : Syntax) (stx : Syntax) : Except String Syntax := do
   let some src := stx.updateTrailing "".toSubstring |>.reprint
     | Macro.throwError "cannot reprint syntax"
   let p : Ident := ⟨matchStx[2]⟩
-  let kwsName := p.getId ++ `keywords
   let test ← `((matchStxFn · $(quoteSyntax stx)))
-  if (← Macro.undefinedGlobalName kwsName) then
-    `(#eval $(p).run $(quote src) >>= $test)
-  else
-    let kws := mkIdentFrom p kwsName
-    let syms := mkIdentFrom p <| p.getId ++ `symbols
-    let cats := mkIdentFrom p <| p.getId ++ `categories
-    `(#eval $(p).run $(quote src) (cats := $cats) (kws := $kws) (syms := $syms) >>= $test)
+  `(#eval $(p).run $(quote src) >>= $test)

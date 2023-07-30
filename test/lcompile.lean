@@ -41,14 +41,17 @@ open Partax Test LCompile
     rw [succ_add m n]
     apply this
 
-def parseFile (path : System.FilePath) : IO PUnit := do
+partial def parseFile (path : System.FilePath) : IO PUnit := do
   let parse : LParseT IO PUnit := do
     IO.println <| toString <| ← Module.header
-    withReader ({· with kws := command.keywords, syms := command.symbols, cats := command.categories}) do
-      repeat do
+    let rec loop := do
       let iniPos ← getInputPos
-      try IO.println <| toString <| ← command catch e =>
-      if iniPos < (← getInputPos) then throw e else break
+      try
+        IO.println <| toString <| ← command
+        loop
+      catch e =>
+        if iniPos < (← getInputPos) then throw e
+    loop
   let input ← IO.FS.readFile path
   IO.ofExcept <| ← (parse.run input path.toString).run
 

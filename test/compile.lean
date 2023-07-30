@@ -12,10 +12,18 @@ open Partax Test Lean Parser
 Examples of syntax compilations with relatively short run times.
 -/
 
-set_option trace.Partax.compile true
-set_parser_compile_config {CompileConfig.lParse with
-  mapName := fun r n => `TCompile ++ r ++ CompileConfig.lParse.mapName r n
+/-
+A compile config that embeds nested compiled nodes into the root node's namespace
+Allows tests to compile the same node twice without changing namespaces.
+-/
+def compileConfig := {CompileConfig.lParse with
+  mapName := fun r n =>
+    let base := CompileConfig.lParse.mapName r n
+    if r.isAnonymous then `TCompile ++ base else r ++ `kinds ++ base
 }
+
+set_option trace.Partax.compile true
+set_parser_compile_config compileConfig
 
 /-
 Simple example of a symbol (an atom) wrapped in a node
@@ -86,17 +94,14 @@ def LParse.decimal : LParseM Syntax :=
 def decimal : ParserDescr := .const `decimal
 syntax exSepDigit := "[" decimal,* "]"
 #print exSepDigit
-compile_parser exSepDigit with {CompileConfig.lParse with
-  mapName := fun r n => `TCompile ++ CompileConfig.lParse.mapName r n
-  syntaxAliases := CompileConfig.lParse.syntaxAliases
+compile_parser exSepDigit with {compileConfig with
+  syntaxAliases := compileConfig.syntaxAliases
     |>.insert `decimal ``LParse.decimal
 }
 #print TCompile.exSepDigit
-def parseExSepDigit (str : String) :=
-  TCompile.exSepDigit.run (syms := TCompile.exSepDigit.symbols) str
-#eval parseExSepDigit "[]"
-#eval parseExSepDigit "[0,] "
-#eval parseExSepDigit " [0, 1]"
+#eval TCompile.exSepDigit.run "[]"
+#eval TCompile.exSepDigit.run "[0,] "
+#eval TCompile.exSepDigit.run " [0, 1]"
 
 /-
 Example of compiling a category

@@ -72,7 +72,7 @@ def resolveGlobalNameNoOverload? [Monad m] [MonadResolveName m] [MonadEnv m] (na
 /-! ## Compile Monad                                                          -/
 --------------------------------------------------------------------------------
 
-@[inline] def KeywordSet.ofList (kws : List Name) : NameSet :=
+@[inline] def NameSet.ofList (kws : List Name) : NameSet :=
   kws.foldl (init := {}) fun s kw => s.insert kw
 
 section
@@ -153,7 +153,7 @@ def withStepTrace (name : Name) (k : CompileM α) (collapsed := false) : Compile
 
 def pushKeywordsDef (ns : Name) (kws : NameSet)  : CompileM PUnit := do
   let kws := kws.fold (init := #[]) fun a n => a.push (quote n : Term)
-  let kws ← ``(KeywordSet.ofList [$kws,*])
+  let kws ← ``(NameSet.ofList [$kws,*])
   pushDef (ns.str "keywords") kws
 
 def pushSymbolsDef (ns : Name) (syms : SymbolSet)  : CompileM PUnit := do
@@ -162,24 +162,39 @@ def pushSymbolsDef (ns : Name) (syms : SymbolSet)  : CompileM PUnit := do
   pushDef (ns.str "symbols") trie
 
 def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
-  let xs ← cats.foldM (init := #[]) fun a n =>
-    return a.push <| ← ``(($(quote n), $(mkIdent n)))
-  let catMap ← ``(ParserMap.ofList [$xs,*])
-  pushDef (ns.str "categories") catMap
+  let cats := cats.fold (init := #[]) fun a n => a.push (quote n : Term)
+  let cats ← ``(NameSet.ofList [$cats,*])
+  pushDef (ns.str "categories") cats
 
-@[inline] def pushParserDataDefs
-(ns : Name) (data : ParserData) : CompileM PUnit := do
-  pushKeywordsDef ns data.kws
-  pushSymbolsDef ns data.syms
-  pushCategoriesDef ns data.cats
+@[inline] def mkLParserDef (pName : Name) (data : ParserData) : CompileM Command := do
+  pushKeywordsDef pName data.kws
+  pushSymbolsDef pName data.syms
+  pushCategoriesDef pName data.cats
+  let maps ← data.cats.foldM (init := #[]) fun a n =>
+    return a.push <| ← ``(($(quote n), $(mkIdent n)))
+  `(
+    partial def $pName := {
+      raw := $(mkIdent <| pName.str "raw")
+      kws := $(mkIdent <| pName.str "keywords")
+      syms := $(mkIdent <| pName.str "symbols")
+      cats := ParserMap.ofList [$maps,*]
+      : LParser _
+    }
+  )
 
 @[inline] def pushCategoriesDataDefs : CompileM PUnit := do
-  let s ← get; s.cats.forM fun cat => do
+  let s ← get
+  let catDefs ← s.cats.foldM (init := #[]) fun defs cat => do
     if (← resolveGlobalNameNoOverload? cat).isNone then
-      if let some data := s.dataMap.find? cat then
-        pushParserDataDefs cat data
-      else
-        throwError "missing date for category '{cat}'"
+      let some pName := s.compileMap.find? cat
+        | throwError "missing compile data for category '{cat}'"
+      let some data := s.dataMap.find? cat
+        | throwError "missing parser data for category '{cat}'"
+      return defs.push <| ← mkLParserDef pName data
+    else
+      return defs
+  unless catDefs.isEmpty do
+    pushCmd <| ←  `(mutual $catDefs* end)
 
 end
 
@@ -301,15 +316,16 @@ def compileCategoryParser : AppHandler Term := fun _ args compileExpr => do
 @[inline] def compileParserDef (cfg : CompileConfig)  (kind : Name) (compile : CompileM Term) : CompileM Name := do
   if let some pName := (← get).compileMap.find? kind then
     addParserDataOf pName
-    return pName
+    return pName.str "raw"
   else
     let pName := cfg.mapName (← read).rootName kind
     let p ← collectParserDataFor pName do compile
-    pushDef pName p
     modify fun s => {s with compileMap := s.compileMap.insert kind pName}
-    return pName
+    let pRawName := pName.str "raw"
+    pushDef pRawName p
+    return pRawName
 
-def compileCategoryDef (catName : Name) (leading trailing : Array Name) : CompileM Unit := do
+def compileCategoryDef (cfg : CompileConfig) (catName : Name) (leading trailing : Array Name) : CompileM Unit := do
   let ref ← getRef
   let leading := leading.map fun n => mkIdentFrom ref n
   let trailing := trailing.map fun n => mkIdentFrom ref n
@@ -318,8 +334,9 @@ def compileCategoryDef (catName : Name) (leading trailing : Array Name) : Compil
       #[$[($leading : LParseM Syntax)],*]
       #[$[($trailing : LParseM (SyntaxNodeKind × Array Syntax))],*]
   )
-  pushDef catName value
-  modify fun s => {s with compileMap := s.compileMap.insert catName catName}
+  let pName := cfg.mapName (← read).rootName catName
+  pushDef (pName.str "raw") value
+  modify fun s => {s with compileMap := s.compileMap.insert catName pName}
 
 /-- The standard compilation configuration for produce `LParse`-based definitions. -/
 def CompileConfig.lParse : CompileConfig where
@@ -427,9 +444,9 @@ def extractParserDataOf (kind const : Name) : CompileM PUnit := do
     | throwError "parser '{const}' is missing a 'keywords : NameSet' definition"
   let .ok syms := evalConstCheck SymbolTrie (← getEnv) (← getOptions) ``SymbolTrie (const.str "symbols")
     | throwError "parser '{const}' is missing a 'symbols : SymbolTrie' definition"
-  let .ok cats := evalConstCheck ParserMap (← getEnv) (← getOptions) ``ParserMap (const.str "categories")
-    | throwError "parser '{const}' is missing a 'categories : ParserMap' definition"
-  let data : ParserData := {kws, syms := syms.toSet, cats := cats.toSet}
+  let .ok cats := evalConstCheck NameSet (← getEnv) (← getOptions) ``NameSet (const.str "categories")
+    | throwError "parser '{const}' is missing a 'categories : NameSet definition"
+  let data : ParserData := {kws, syms := syms.toSet, cats := cats}
   modify fun s => {s with
     toParserData := s.toParserData.union data
     compileMap := s.compileMap.insert kind const
@@ -583,7 +600,7 @@ def compileParserCategoryCore (cfg : CompileConfig) (catName : Name) : CompileM 
       trailingPs := trailingPs.push p
     | _ =>
       leadingPs := leadingPs.push p
-  compileCategoryDef catName leadingPs trailingPs
+  compileCategoryDef cfg catName leadingPs trailingPs
 
 partial def compileParserCategory (cfg : CompileConfig) (catName : Name) : CompileM PUnit := do
   addCategory catName
@@ -601,22 +618,32 @@ partial def compileParserCategory (cfg : CompileConfig) (catName : Name) : Compi
 
 def compileParserCategoryTopLevel (cfg : CompileConfig) (catName : Name) : CompileM Unit := do
   withReader ({· with rootName := catName}) do
-    compileParserCategory cfg catName
+  compileParserCategory cfg catName
   pushCategoriesDataDefs
 
-def compileParserInfoTopLevel (cfg : CompileConfig) (pName : Name) (info : ConstantInfo) : CompileM Unit := do
+def compileParserInfoTopLevel (cfg : CompileConfig) (rootName : Name) (info : ConstantInfo) : CompileM Unit := do
+  withReader ({· with rootName := rootName}) do
   withStepTrace info.name (collapsed := true) do
-  let p ← withReader ({· with rootName := pName}) do
-    compileParserInfo cfg info
-  unless (← get).compileMap.find? info.name = some pName do
-    pushDef pName p
-    modify fun s => {s with
-      dataMap := s.dataMap.insert pName s.toParserData
-      compileMap := s.compileMap.insert info.name pName
-    }
+  let p ← compileParserInfo cfg info
+  let pName ← do
+    match (← get).compileMap.find? info.name with
+    | some name => pure name
+    | none =>
+      let pName := cfg.mapName (← read).rootName info.name
+      let pRawName := pName.str "raw"
+      pushDef pRawName p
+      modify fun s => {s with
+        dataMap := s.dataMap.insert pName s.toParserData
+        compileMap := s.compileMap.insert info.name pName
+      }
+      pure pName
   (← get).cats.forM (compileParserCategory cfg ·)
-  pushParserDataDefs pName (← get).toParserData
   pushCategoriesDataDefs
+  let some data := (← get).dataMap.find? pName
+    | throwError "missing parser data for '{pName}'"
+  pushCmd <| ← mkLParserDef pName data
+  unless rootName = pName do
+    pushDef rootName pName
 
 end
 

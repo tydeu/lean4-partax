@@ -21,10 +21,10 @@ abbrev InterpolatedStr := TSyntax interpolatedStrKind
 -- # LParseM Type for Parsing Syntax
 --------------------------------------------------------------------------------
 
-opaque OpaqueLParse.nonemptyType (α : Type u) : NonemptyType.{0}
+opaque OLParseM.nonemptyType (α : Type u) : NonemptyType.{0}
 /-- An opaque forward-declared version of `LParseM` for wrapping category parsers. -/
-def OpaqueLParse (α : Type α) : Type := OpaqueLParse.nonemptyType α |>.type
-instance : Nonempty (OpaqueLParse α) :=  OpaqueLParse.nonemptyType α |>.property
+def OLParseM (α : Type α) : Type := OLParseM.nonemptyType α |>.type
+instance : Nonempty (OLParseM α) :=  OLParseM.nonemptyType α |>.property
 
 abbrev SymbolTrie := Lean.Parser.Trie String
 @[inline] def SymbolTrie.empty : SymbolTrie := {}
@@ -41,20 +41,20 @@ where
     let s := if let some sym := sym? then s.insert sym else s
     map.fold (init := s) fun s _ t => go s t
 
-abbrev ParserMap := NameMap (OpaqueLParse Syntax)
+abbrev ParserMap := NameMap (OLParseM Syntax)
 @[inline] def ParserMap.empty : ParserMap := {}
-@[inline] def ParserMap.ofList (xs : List (Name × OpaqueLParse Syntax)) : ParserMap :=
-  xs.foldl (init := {}) fun m (k, v) => m.insert k v
-@[inline] def ParserMap.toSet (map : ParserMap) : NameSet :=
+@[inline] def ParserMap.keySet (map : ParserMap) : NameSet :=
   map.fold (init := {}) fun s k _ => s.insert k
 
-structure LParseContext extends InputContext where
+structure LParseData where
+  kws : NameSet := {}
+  syms : SymbolTrie := {}
+  cats : ParserMap := {}
+
+structure LParseContext extends InputContext, LParseData where
   prec : Nat := 0
   savedPos? : Option String.Pos := none
-  cats : ParserMap := {}
-  kws : NameSet := {}
   forbiddenKw : Name := .anonymous
-  syms : SymbolTrie := {}
 
 structure LParseState where
   lhsPrec : Nat := 0
@@ -68,20 +68,41 @@ abbrev LParseT (m) := ReaderT LParseContext <| ExceptT Error <| StateT LParseSta
 abbrev LParseM := ReaderT LParseContext <| EStateM Error LParseState
 
 instance [Pure m] : MonadLift LParseM (LParseT m) where
-  monadLift x := fun r s =>
-    match x r s with
+  monadLift p := fun r s =>
+    match p r s with
     | .ok a s => pure (.ok a, s)
     | .error e s => pure (.error e, s)
 
-namespace OpaqueLParse
-unsafe def unsafeMk : LParseM α → OpaqueLParse α := unsafeCast
-@[implemented_by unsafeMk] opaque mk : LParseM α → OpaqueLParse α
-instance : Coe (LParseM α) (OpaqueLParse α)  := ⟨mk⟩
-instance : Inhabited (OpaqueLParse α) := ⟨mk default⟩
-unsafe def unsafeGet : OpaqueLParse α → LParseM α := unsafeCast
-@[implemented_by unsafeGet] opaque get : OpaqueLParse α → LParseM α
-instance : Coe (OpaqueLParse α) (LParseM α) := ⟨get⟩
-end OpaqueLParse
+/-- A parse function equipped with `LParseData` metadata about it. -/
+structure LParser (α) extends LParseData where
+  raw : LParseM α
+
+@[inline] protected def LParser.map (f : α → β) (p : LParser α) : LParser β :=
+  {raw := f <$> p.raw, toLParseData := p.toLParseData}
+
+instance : Functor LParser where map := LParser.map
+
+@[inline] protected def LParser.toLParseM (p : LParser α) : LParseM α :=
+  withReader ({· with toLParseData := p.toLParseData}) p.raw
+
+instance : MonadLift LParser LParseM where
+  monadLift := LParser.toLParseM
+
+instance : Coe (LParser α) (LParseM α) where
+  coe := LParser.toLParseM
+
+namespace OLParseM
+unsafe def unsafeMk : LParseM α → OLParseM α := unsafeCast
+@[implemented_by unsafeMk] opaque mk : LParseM α → OLParseM α
+instance : Coe (LParseM α) (OLParseM α)  := ⟨mk⟩
+instance : Inhabited (OLParseM α) := ⟨mk default⟩
+unsafe def unsafeGet : OLParseM α → LParseM α := unsafeCast
+@[implemented_by unsafeGet] opaque get : OLParseM α → LParseM α
+instance : Coe (OLParseM α) (LParseM α) := ⟨get⟩
+end OLParseM
+
+@[inline] def ParserMap.ofList (xs : List (Name × LParseM Syntax)) : ParserMap :=
+  xs.foldl (init := {}) fun m (k, v) => m.insert k v
 
 class MonadIgnoredBefore (m : Type → Type u) where
   getIgnoredBefore : m Substring
@@ -160,15 +181,19 @@ instance : ThrowUnexpected LParseM where
   throwUnexpected unexpected expected := throw {unexpected, expected}
 
 open Parser in
-nonrec def LParseM.run (input : String) (p : LParseM α) (fileName := "<string>")
-(rbp := 0) (cats : ParserMap := {}) (kws : NameSet := {}) (syms : SymbolTrie := {}) : Except String α :=
+nonrec def LParseM.run
+(input : String) (p : LParseM α) (fileName := "<string>")
+(rbp := 0) (data : LParseData := {}) : Except String α :=
   let ictx := mkInputContext input fileName
-  let ctx := {toInputContext := ictx, prec := rbp, cats, kws, syms}
+  let ctx := {toInputContext := ictx, prec := rbp, toLParseData := data}
   match (LParse.fullInput p : LParseM α).run ctx |>.run {} with
   | .ok a _ => .ok a
   | .error e s =>
     let pos := ctx.fileMap.toPosition s.inputPos
     .error <| mkErrorStringWithPos ctx.fileName pos (toString e)
+
+@[inline] def LParser.run (input : String) (p : LParser α) (fileName := "<string>") (rbp := 0) : Except String α :=
+  p.raw.run input fileName rbp p.toLParseData
 
 instance [Monad m]  : MonadInput (LParseT m) where
   getInput := (·.input) <$> read
@@ -184,10 +209,11 @@ instance [Pure m] : MonadBacktrack LParseState (LParseT m) where
   restoreState s := fun _ _ => pure (.ok (), s)
 
 open Parser in
-nonrec def LParseT.run [Monad m] (input : String) (p : LParseT m α) (fileName := "<string>")
-(rbp := 0) (cats : ParserMap := {}) (kws : NameSet := {}) (syms : SymbolTrie := {}) : ExceptT String m α := do
+nonrec def LParseT.run [Monad m]
+(input : String) (p : LParseT m α) (fileName := "<string>")
+(rbp := 0) (data : LParseData := {}) : ExceptT String m α := do
   let ictx := mkInputContext input fileName
-  let ctx := {toInputContext := ictx, prec := rbp, cats, kws, syms}
+  let ctx := {toInputContext := ictx, prec := rbp, toLParseData := data}
   match (← (LParse.fullInput p : LParseT m α).run ctx |>.run.run {}) with
   | (.ok a, _) => pure a
   | (.error e, s) =>
