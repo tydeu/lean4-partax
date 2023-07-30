@@ -9,7 +9,7 @@ import Partax.Test.Basic
 open Partax Test Lean Parser
 
 /-! # Basic Compile Tests
-Examples of syntax compilations with relatively short run times.
+Examples of Custom syntax compilations with relatively short run times.
 -/
 
 /-
@@ -87,6 +87,17 @@ compile_parser exP
 #match_stx exP TCompile.exP | /-- hello/hello /- hello-hello -/ -/
 
 /-
+Example of compiling a category
+-/
+declare_syntax_cat exCat
+syntax "a" : exCat
+syntax "b" exCat : exCat
+syntax exCatP := exCat
+compile_parser exCatP
+#match_stx exCatP TCompile.exCatP | b b a
+
+
+/-
 Example of using our own builtin aliases
 -/
 def LParse.decimal : LParseM Syntax :=
@@ -102,60 +113,3 @@ compile_parser exSepDigit with {compileConfig with
 #eval TCompile.exSepDigit.run "[]"
 #eval TCompile.exSepDigit.run "[0,] "
 #eval TCompile.exSepDigit.run " [0, 1]"
-
-/-
-Example of compiling a category
--/
-declare_syntax_cat exCat
-syntax "a" : exCat
-syntax "b" exCat : exCat
-syntax exCatP := exCat
-compile_parser exCatP
-#match_stx exCatP TCompile.exCatP | b b a
-
-/-
-Demonstration of compiling builtin Lean syntax
--/
-
-set_parser_compile_config CompileConfig.lParse
-
-namespace ex
-
-compile_parser Tactic.caseArg
-#match_stx Parser.Tactic.caseArg Tactic.caseArg | foo.bar _
-
-compile_parser_category prio
-#match_stx prio prio | default + default
-
-open Lean Elab Command in
-#eval liftMacroM (m := CommandElabM) do
-  match prio.run "default" with
-  | .ok stx => evalPrio stx
-  | .error e => Macro.throwError e
-
-compile_parser_category prec
-#match_stx prec prec | max - 10
-
-compile_parser_category level
-#match_stx level level | max u
-#match_stx level level | imax (u+1) _ v
-
-compile_parser_category stx
-#match_stx stx stx | ("compile_parser " ident (" as " ident)?)
-
-compile_parser_category attr
-#match_stx attr attr | custom (high + default)
-#match_stx attr attr | instance (high + default)
-
-compile_parser Term.attributes => attrs
-#match_stx Parser.Term.attributes attrs | @[instance high, inline]
-
-end ex
-
-/-
-Dry run compile of the whole Lean grammar
--/
-
-namespace ex'
-compile_parser_category (dry) command
-end ex'

@@ -22,8 +22,8 @@ compile_parser Lean.Parser.Term.attributes => attrs -- with CompileConfig.lParse
 compile_parser_category prio -- with CompileConfig.lParse
 #eval prio.run "default + default" -- TSyntax `Lean.Parser.Syntax.addPrio
 
-open Lean Elab Command in
-#eval liftMacroM (m := CommandElabM) do -- 2000
+open Lean Elab Command in -- 2000
+#eval liftMacroM (m := CommandElabM) do
   match prio.run "default + default" with
   | .ok stx => evalPrio stx
   | .error e => Macro.throwError e
