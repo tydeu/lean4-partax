@@ -166,14 +166,14 @@ def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
   let cats ← ``(NameSet.ofList [$cats,*])
   pushDef (ns.str "categories") cats
 
-@[inline] def mkLParserDef (pName : Name) (data : ParserData) : CompileM Command := do
+@[inline] def pushLParserDef (pName : Name) (data : ParserData) : CompileM PUnit := do
   pushKeywordsDef pName data.kws
   pushSymbolsDef pName data.syms
   pushCategoriesDef pName data.cats
   let maps ← data.cats.foldM (init := #[]) fun a n =>
     return a.push <| ← ``(($(quote n), $(mkIdent <| n.str "raw")))
-  `(
-    def $pName := show LParser _ from {
+  pushDef pName <| ← `(
+    show LParser _ from {
       raw := $(mkIdent <| pName.str "raw")
       kws := $(mkIdent <| pName.str "keywords")
       syms := $(mkIdent <| pName.str "symbols")
@@ -182,18 +182,13 @@ def pushCategoriesDef (ns : Name) (cats : NameSet)  : CompileM PUnit := do
   )
 
 @[inline] def pushCategoriesDataDefs : CompileM PUnit := do
-  let s ← get
-  let catDefs ← s.cats.foldM (init := #[]) fun defs cat => do
+  let s ← get; s.cats.forM fun cat => do
     if (← resolveGlobalNameNoOverload? cat).isNone then
       let some pName := s.compileMap.find? cat
         | throwError "missing compile data for category '{cat}'"
       let some data := s.dataMap.find? cat
         | throwError "missing parser data for category '{cat}'"
-      return defs.push <| ← mkLParserDef pName data
-    else
-      return defs
-  unless catDefs.isEmpty do
-    pushCmd <| ←  `(mutual $catDefs* end)
+      pushLParserDef pName data
 
 end
 
@@ -647,7 +642,7 @@ def compileParserInfoTopLevel (cfg : CompileConfig) (rootName : Name) (info : Co
       pure pName
   (← get).cats.forM (compileParserCategory cfg ·)
   pushCategoriesDataDefs
-  pushCmd <| ← mkLParserDef pName (← get).toParserData
+  pushLParserDef pName (← get).toParserData
   unless rootName = pName do
     pushDef rootName pName
 
