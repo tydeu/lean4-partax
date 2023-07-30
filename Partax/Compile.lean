@@ -675,6 +675,11 @@ def evalOptCompileConfig (cfg? : Option Term) : TermElabM CompileConfig :=
   | some cfg => evalCompileConfig cfg
   | none =>  return defaultCompileConfigExt.getState (← getEnv)
 
+/--
+Set the default compile configuration
+used by compile commands (`compile_parser[_category]`) in this file.
+The initial default is `CompileConfig.lParse`.
+-/
 scoped syntax "set_parser_compile_config " term : command
 elab_rules : command | `(set_parser_compile_config $cfg) => do
   let cfg ← liftTermElabM <| evalCompileConfig cfg
@@ -682,6 +687,21 @@ elab_rules : command | `(set_parser_compile_config $cfg) => do
 
 syntax dry := "(" noWs &"dry" noWs ")"
 
+/--
+Compiles the specified Lean parser / syntax category (e.g., `term`, `attr`).
+Details of the process can be configured using a term of type `CompileConfig`
+provided via an optional `with` clause. For example:
+
+```
+compile_parser_category attr with myCompileConfig
+```
+
+By default, the command will use `CompileConfig.lParse`, which produces
+`LParseM` monadic parser definitions for nested parsers, and an `LParser`
+definition for the category and any nested categories.
+
+**NOTE:** Compiling large categories (e.g., `term`) can take minutes.
+-/
 scoped syntax "compile_parser_category " (dry)? ident (" with " term)? : command
 elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident $[with $cfg?]?) => do
   let catName := cat.getId
@@ -692,6 +712,23 @@ elab_rules : command | `(compile_parser_category $[$dry?]? $cat:ident $[with $cf
   let cmd : Command := ⟨mkNullNode defs⟩; traceDefs defs
   if dry?.isNone then withMacroExpansion (← getRef) cmd <| elabCommand cmd
 
+/--
+Compiles the specified Lean parser or syntax (e.g., `Lean.Parser.Term.attributes`).
+Details of the process can be configured using a term of type `CompileConfig`
+provided via an optional `with` clause. You can also provide a new name for
+the top-level result via an optional `=>` clause. For example:
+
+```
+compile_parser Lean.Parser.Term.attributes => attrs with myConfig
+```
+
+By default, the command will use `CompileConfig.lParse`, which produces
+`LParseM` monadic parser definitions for nested parsers, and `LParser`
+definitions for nested categories and the top-level parser.
+
+**NOTE:** Compiling parsers that have deep nesting / utilize large categories
+(e.g., `command`, `term`, `tactic`) can take minutes.
+-/
 scoped syntax "compile_parser " (dry)? ident (" => " ident)? (" with " term)? : command
 elab_rules : command | `(compile_parser $[$dry?]? $id $[=> $root?]? $[with $cfg?]?) => do
   let name ← resolveGlobalConstNoOverload id
