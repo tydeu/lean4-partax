@@ -3,6 +3,7 @@ Copyright (c) 2022-2023 Mac Malone. All rights reserved.
 Released under the Apache 2.0 license as described in the file LICENSE.
 Authors: Mac Malone
 -/
+import Partax.String
 import Lean.Util.MonadBacktrack
 
 namespace Partax
@@ -108,6 +109,18 @@ variable [ThrowUnexpected m]
 /-- Throw if at end-of-input. -/
 @[inline] def checkNotEOI (expected : List String := []) : m PUnit := do
   if (← getIsEOI) then throwUnexpectedEOI expected
+
+/--
+Throw at `pos` if it is at the end of `input`.
+Otherwise, return a proof that it is not.
+-/
+@[inline] def ensureNotEOI (input : String) (pos : String.Pos)
+(expected : List String := [])  : m (PLift ¬ input.atEnd pos) := do
+  if h : input.atEnd pos then
+    setInputPos pos
+    throwUnexpectedEOI expected
+  else
+    return .up h
 
 /-- Invoke `f` with a proof that the parser head is not at end-of-input. -/
 @[inline] def withNotEOI
@@ -295,15 +308,28 @@ Returns whether it succeeded. Throws on end-of-input.
   discard <| trySatisfy p expected
 
 /-- Consume the characters until one matches `p`. Does not consume the matched character. -/
-@[specialize] partial def skipToSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
-  withNotEOI (expected := expected) fun input pos h => do
-    unless p <| input.get' pos h do
-      setInputPos <| input.next' pos h
-      skipToSatisfy p
+@[inline] def skipToSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
+  let input ← getInput
+  let rec @[specialize] loop pos := do
+    let ⟨h⟩ ← ensureNotEOI input pos expected
+    if p <| input.get' pos h then
+      setInputPos pos
+    else
+      loop <| input.next' pos h
+  loop (← getInputPos)
+termination_by loop pos => input.utf8ByteSize - pos.byteIdx
 
 /-- Consume characters until one matches `p`. Consumes the matched character. -/
-@[specialize] partial def skipTillSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
-  let c ← next1 expected; unless p c do skipTillSatisfy p
+@[inline] def skipTillSatisfy (p : Char → Bool) (expected : List String := []) : m PUnit := do
+  let input ← getInput
+  let rec @[specialize] loop pos := do
+    let ⟨h⟩ ← ensureNotEOI input pos expected
+    if p <| input.get' pos h then
+      setInputPos <| input.next' pos h
+    else
+      loop <| input.next' pos h
+  loop (← getInputPos)
+termination_by loop pos => input.utf8ByteSize - pos.byteIdx
 
 /-- Skip over a character `c` in the input. -/
 @[inline] def skipChar (c : Char) : m PUnit :=

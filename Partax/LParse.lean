@@ -128,24 +128,40 @@ instance [MonadLift m n] [MonadIgnoredBefore m] : MonadIgnoredBefore n where
 namespace LParse
 variable [Monad m] [MonadInput m] [ThrowUnexpected m]
 
-@[specialize] partial def skipCommentBody : m Unit := do
-  let rec loop (nesting : Nat) := do
-    match (← next1) with
+@[inline] def skipCommentBody : m Unit := do
+  let input ← getInput
+  let expected := ["'-/'"]
+  let rec @[specialize] loop (pos) (nesting : Nat) := do
+    let ⟨h⟩ ← ensureNotEOI input pos expected
+    let pos' := input.next' pos h
+    match input.get' pos h with
     | '-' =>
-      if (← next1) = '/' then
-        if nesting = 0 then
-          return
-        else
-          loop (nesting-1)
-      else
-        loop nesting
+      let rec @[specialize] dashLoop pos := do
+        let ⟨h⟩ ← ensureNotEOI input pos expected
+        let pos' := input.next' pos h
+        match input.get' pos h with
+        | '-' =>
+          dashLoop pos'
+        | '/' =>
+          if nesting = 0 then
+            setInputPos pos'
+          else
+            loop pos' (nesting-1)
+        | _ =>
+          loop pos' nesting
+      dashLoop pos'
     | '/' =>
-      if (← next1) = '-' then
-        loop (nesting+1)
+      let ⟨h'⟩ ← ensureNotEOI input pos' expected
+      if input.get' pos' h' = '-' then
+        loop (input.next' pos' h') (nesting+1)
       else
-        loop nesting
-    | _ => loop nesting
-  loop 0
+        loop pos' nesting
+    | _ =>
+      loop pos' nesting
+  loop (← getInputPos) 0
+termination_by
+  loop pos _ => input.utf8ByteSize - pos.byteIdx
+  dashLoop pos => input.utf8ByteSize - pos.byteIdx
 
 variable [MonadCheckpoint m] [MonadExcept ε m]
 
@@ -625,20 +641,31 @@ def sepBy1Indent (p : LParseM Syntax)
 (sep : String) (psep : LParseM Syntax := symbol sep) (allowTrailingSep := false) : LParseM Syntax :=
   withPosition <| sepBy1 (checkColGe *> p) sep (psep <|> checkColEq *> checkLinebreakBefore *> pushNone) allowTrailingSep
 
-@[inline] partial def trailingLoop (head : Syntax)
-(trailing : Array (LParseM (SyntaxNodeKind × Array Syntax))) (h : trailing.size > 0) : LParseM Syntax :=
-  step head
-where
-  step head := do
-    let iniPos ← getInputPos
-    checkpoint fun restore => do
-    match (← observing <| longestMatch trailing h Parser.Error.merge) with
-    | .ok (kind, args) =>
-      let node := (.node .none kind <| #[head] ++ args)
-      -- break the loop if a successful trailing parser does not consume anything
-      if iniPos = (← getInputPos) then return node else step node
-    | .error e =>
-      if iniPos < (← getInputPos) then throw e else restore; return head
+@[inline] def trailingLoop (head : Syntax)
+(trailing : Array (LParseM (SyntaxNodeKind × Array Syntax))) (h : trailing.size > 0) : LParseM Syntax := do
+  let rec step input iniPos head :=
+    if _ : input.atEnd iniPos then
+      return head
+    else
+      checkpoint fun restore => do
+      match (← observing <| longestMatch trailing h Parser.Error.merge) with
+      | .ok (kind, args) =>
+        let node := (.node .none kind <| #[head] ++ args)
+        -- break the loop if a successful trailing parser does not consume anything
+        let newPos ← getInputPos
+        if iniPos < newPos then
+          step input newPos node
+        else
+          return node
+      | .error e =>
+        if iniPos < (← getInputPos) then
+          throw e
+        else
+          restore
+          return head
+  step (← getInput) (← getInputPos) head
+termination_by
+  step input pos _ => input.utf8ByteSize - pos.byteIdx
 
 /-- Parse a category with the given `leading` and `trailing` parsers. -/
 def category (name : Name) (leading : Array (LParseM Syntax))

@@ -85,7 +85,7 @@ Example of compiling a real parser
 -/
 syntax exP := Command.docComment
 compile_parser exP
-#match_stx exP TCompile.exP | /-- hello/hello /- hello-hello -/ -/
+#match_stx exP TCompile.exP | /-- hello/hello /- hello-hello -/ --/
 
 /-
 Example of compiling a category
@@ -111,6 +111,6 @@ compile_parser exSepDigit with {compileConfig with
     |>.insert `decimal ``LParse.decimal
 }
 #print TCompile.exSepDigit
-#eval TCompile.exSepDigit.run "[]"
-#eval TCompile.exSepDigit.run "[0,] "
-#eval TCompile.exSepDigit.run " [0, 1]"
+#eval TCompile.exSepDigit.run' "[]"
+#eval TCompile.exSepDigit.run' "[0,] "
+#eval TCompile.exSepDigit.run' " [0, 1]"
