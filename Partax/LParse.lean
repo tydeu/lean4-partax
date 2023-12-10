@@ -29,7 +29,7 @@ opaque OLParseM.nonemptyType (α : Type u) : NonemptyType.{0}
 def OLParseM (α : Type α) : Type := OLParseM.nonemptyType α |>.type
 instance : Nonempty (OLParseM α) :=  OLParseM.nonemptyType α |>.property
 
-abbrev SymbolTrie := Lean.Parser.Trie String
+abbrev SymbolTrie := Lean.Data.Trie String
 @[inline] def SymbolTrie.empty : SymbolTrie := {}
 @[inline] def SymbolTrie.ofList (syms : List String) : SymbolTrie :=
   syms.foldl (init := {}) fun t s => t.insert s s
@@ -37,12 +37,21 @@ abbrev SymbolTrie := Lean.Parser.Trie String
 abbrev SymbolSet := RBTree String compare
 @[inline] def SymbolSet.empty : SymbolSet := {}
 @[inline] partial def SymbolTrie.toSet (trie : SymbolTrie) : SymbolSet :=
-  go {} trie
+  go trie |>.run {} |>.run.2
 where
-  go s
-  | .Node sym? map =>
-    let s := if let some sym := sym? then s.insert sym else s
-    map.fold (init := s) fun s _ t => go s t
+  go : SymbolTrie → StateM SymbolSet Unit
+    | .leaf a? => do
+      if let some a := a? then
+        modify (·.insert a)
+    | .node1 a? _ t' => do
+      if let some a := a? then
+        modify (·.insert a)
+      go t'
+    | .node a? _ ts => do
+      if let some a := a? then
+        modify (·.insert a)
+      ts.forM fun t' => go t'
+
 
 abbrev ParserMap := NameMap (OLParseM Syntax)
 @[inline] def ParserMap.empty : ParserMap := {}
@@ -447,12 +456,12 @@ def rawCh (c : Char) (trailingWs := false) : LParseM Syntax := do
 def symbol (sym : String) : LParseM Syntax := do
   let sym := sym.trim
   let info ← extractSourceInfo do
-    let (newPos, nextSym?) :=
-      (← read).syms.matchPrefix (← getInput) (← getInputPos)
+    let iniPos ← getInputPos
+    let nextSym? := (← read).syms.matchPrefix (← getInput) iniPos
     let expected := [s!"'{sym}'"]
     if let some nextSym := nextSym? then
       if sym = nextSym then
-        setInputPos newPos
+        setInputPos (iniPos + nextSym)
       else
         throwUnexpected s!"unexpected symbol '{nextSym}'" expected
     else
@@ -586,7 +595,7 @@ def nameLit : LParseM NameLit :=
 
 def many1Unbox (p : LParseM Syntax) : LParseM Syntax :=
   collectMany1 p <&> fun xs =>
-    if _ : xs.size = 1 then xs[0]'(by simp [*]) else mkNullNode xs
+    if _ : xs.size = 1 then xs[0]'(by simp only [*]; decide) else mkNullNode xs
 
 partial def sepByTrailing (args : Array Syntax)
 (p : LParseM Syntax) (sep : LParseM Syntax) : LParseM Syntax := do
